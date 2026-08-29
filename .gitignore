@@ -1,3 +1,5 @@
 *.mhcert
 !certificates/examples/
 !certificates/examples/*.mhcert
+
+build/
