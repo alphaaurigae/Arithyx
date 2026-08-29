@@ -1,0 +1,15 @@
+{
+  "identifier": "toy_mod7",
+  "name": "Toy divisibility claim (certificate-machinery test fixture)",
+  "statement": "For all n in the searched domain, 7 does not divide n.",
+  "domain": "non-negative integers n in a finite search interval [begin, end)",
+  "quantifiers": "universal, deliberately false",
+  "status": "not a real open problem. This is a deliberately simple, deliberately FALSE toy claim (n=7 is a trivial counterexample) used exclusively to exercise and test the search -> candidate -> certificate -> independent verification pipeline end to end at negligible computational cost.",
+  "known_bounds": "trivial: the first counterexample in any interval containing a positive multiple of 7 is that multiple",
+  "certificate_type": "counterexample: witness n; bounded_result: search interval [begin, end) (only meaningful for intervals with no multiple of 7)",
+  "search_backend": "trial iteration, native uint64_t",
+  "verification_backend": "independent recomputation of n mod 7",
+  "references": [
+    "None. This is a synthetic test fixture, not a mathematical source."
+  ]
+}

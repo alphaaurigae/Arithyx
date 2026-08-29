@@ -1,0 +1,37 @@
+# Deliberately suppressed checks (rationale in GUIDANCE.md, "Static analysis" section):
+#  - readability-braces-around-statements: this codebase uses single-line
+#    guard clauses ("if (!x) return unexpected(err);") pervasively for the
+#    std::expected-based early-return style; this mirrors GCC/Linux kernel
+#    style (both cited as explicit style inspirations) and is not a
+#    correctness risk for single-statement, no-nested-if guard clauses.
+#  - bugprone-easily-swappable-parameters: fires on mathematically
+#    commutative arguments (mulmod(a,b,m), gcd(a,b)) where "swapping" is
+#    not a bug, and on small internal-linkage helpers with a single,
+#    already-tested call site.
+#  - readability-convert-member-functions-to-static: verifier classes
+#    (KurepaVerifier, ToyMod7Verifier, PigeonholeVerifier) are deliberately
+#    modeled as stateful objects (a natural extension point for future
+#    configuration such as brute-force limits or audit logging), even
+#    though no instance currently holds state.
+#  - readability-function-cognitive-complexity: threshold raised, not
+#    disabled, for the DPLL unit-propagation loop; it is a single,
+#    well-tested hot function where splitting it further reduces rather
+#    than improves auditability.
+Checks: >
+  modernize-*,
+  performance-*,
+  bugprone-*,
+  readability-*,
+  cert-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -cert-err58-cpp,
+  -readability-braces-around-statements,
+  -bugprone-easily-swappable-parameters,
+  -readability-convert-member-functions-to-static
+WarningsAsErrors: ''
+HeaderFilterRegex: 'math-hunter/(include|src)/.*'
+CheckOptions:
+  - key: readability-function-cognitive-complexity.Threshold
+    value: '40'

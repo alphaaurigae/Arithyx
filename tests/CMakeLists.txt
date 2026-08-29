@@ -1,0 +1,13 @@
+function(mathhunter_add_test name)
+    add_executable(${name} ${name}.cpp)
+    target_link_libraries(${name} PRIVATE mathhunter_core)
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+mathhunter_add_test(test_modular)
+mathhunter_add_test(test_certificate_roundtrip)
+mathhunter_add_test(test_certificate_corruption)
+mathhunter_add_test(test_kurepa_verifier)
+mathhunter_add_test(test_toy_verifier)
+mathhunter_add_test(test_pigeonhole)

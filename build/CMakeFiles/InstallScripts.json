@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/mmmm/Desktop/olddesk/own/repo-own/c++/math/math-hunter/build/cmake_install.cmake",
+		"/home/mmmm/Desktop/olddesk/own/repo-own/c++/math/math-hunter/build/tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

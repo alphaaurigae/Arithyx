@@ -1,0 +1,17 @@
+{
+  "identifier": "kurepa",
+  "name": "Kurepa's left factorial conjecture",
+  "statement": "Define the left factorial K(n) = sum_{i=0}^{n-1} i!. Kurepa (1971) conjectured that gcd(K(n), n!) = 2 for every integer n > 1. This is equivalent to the statement: for every odd prime p, p does not divide K(p).",
+  "domain": "odd primes p (equivalently, positive integers n > 1 for the gcd form)",
+  "quantifiers": "universal: for all odd primes p, p does not divide K(p)",
+  "status": "open. A 2022 preprint by N. Abramov claims an elementary proof, but it has not been independently confirmed or accepted by the number theory community as of this framework's last review. Treat unconfirmed proof claims for this conjecture with caution: a 2004 proof claim by D. Barsky and B. Benzaghou was later shown to be flawed and was retracted in 2011.",
+  "known_bounds": "Verified computationally with no counterexample for all primes p below 2^34 (Andrejic & Tatarevic, 2016), with later work extending coverage further using improved algorithms. This framework's own bounded searches are independent, much smaller-scale re-derivations for demonstration and should not be read as extending the mathematical literature's record.",
+  "certificate_type": "counterexample: witness prime p; bounded_result: search interval [begin, end)",
+  "search_backend": "modular arithmetic (exact, GMP mpz_class); sequential search over odd primes",
+  "verification_backend": "independent exact recomputation: deterministic Miller-Rabin primality (GMP-based, distinct code path from the search-side native 64-bit primality test) plus direct left-factorial-mod-p recomputation",
+  "references": [
+    "D. Kurepa, 'On the left factorial function !n', Math. Balkanica 1 (1971), 147-153.",
+    "V. Andrejic, A. Tatarevic, 'Searching for a counterexample to Kurepa's conjecture', Math. Comp. 85 (2016), 3061-3068.",
+    "D. Barsky, B. Benzaghou, 'Nombres de Bell et somme de factorielles', Journal de Theorie des Nombres de Bordeaux 16 (2004); erratum/retraction 2011."
+  ]
+}

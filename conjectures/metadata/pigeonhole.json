@@ -1,0 +1,16 @@
+{
+  "identifier": "pigeonhole",
+  "name": "Pigeonhole principle PHP(n) (SAT-natural known-result benchmark)",
+  "statement": "PHP(n): n pigeons cannot be placed into n-1 holes such that no hole contains two pigeons. Encoded as a CNF formula, PHP(n) is unsatisfiable for every n >= 1.",
+  "domain": "positive integers n (number of pigeons); encoded over n*(n-1) Boolean variables",
+  "quantifiers": "universal over placements; the CNF is UNSAT for every n (a theorem, not a conjecture)",
+  "status": "solved / known result. Included as a known-result benchmark (not an open conjecture) to validate the SAT encoding, DPLL search backend, and independent brute-force UNSAT verifier. PHP(n) is also the classical example of a CNF family requiring exponential-size resolution refutations (Haken, 1985), which is why it is a standard SAT-solver stress test.",
+  "known_bounds": "proved for all n by a simple counting argument; this framework's brute-force verifier is capacity-limited to small n (see PigeonholeVerifier::kMaxBruteForcePigeons) since it checks UNSAT by exhaustively enumerating all 2^(n*(n-1)) assignments rather than checking a resolution/DRAT proof",
+  "certificate_type": "candidate_proof / verified_proof: pigeon count n, plus a hash of the exact CNF that was solved",
+  "search_backend": "custom DPLL SAT solver with unit propagation (src/sat/dpll_solver.cpp)",
+  "verification_backend": "independent: CNF is rebuilt from n alone (not trusted from the certificate), checked against closed-form variable/clause count invariants, hash-compared against the certificate, then exhaustively brute-forced for a satisfying assignment; this deliberately does not call the DPLL solver at all",
+  "references": [
+    "A. Haken, 'The intractability of resolution', Theoretical Computer Science 39 (1985), 297-308.",
+    "This is a standard textbook combinatorics/proof-complexity example; see any introductory proof complexity or SAT solving reference."
+  ]
+}
