@@ -5,7 +5,7 @@ namespace mathhunter::verifier {
 using conjectures::kurepa::Evidence;
 using conjectures::kurepa::Witness;
 
-std::expected<KurepaVerifier::VerifiedCounterexample, VerificationFailure>
+std::expected<KurepaVerifier::VerifiedCounterexample, KurepaVerifier::Failure>
 KurepaVerifier::verify_counterexample(const Witness& witness) const {
     if (witness.p <= 2) {
         return std::unexpected(VerificationFailure::WitnessOutOfDomain);
@@ -14,7 +14,7 @@ KurepaVerifier::verify_counterexample(const Witness& witness) const {
         return std::unexpected(VerificationFailure::WitnessOutOfDomain);
     }
     if (!arithmetic::is_prime_exact(witness.p)) {
-        return std::unexpected(VerificationFailure::NotPrime);
+        return std::unexpected(KurepaDomainFailure::NotPrime);
     }
 
     const auto p_u64 = arithmetic::try_to_u64(witness.p);
@@ -34,7 +34,7 @@ KurepaVerifier::verify_counterexample(const Witness& witness) const {
     return VerifiedCounterexample(std::move(payload), core::VerificationToken{});
 }
 
-std::expected<KurepaVerifier::VerifiedBoundedResult, VerificationFailure>
+std::expected<KurepaVerifier::VerifiedBoundedResult, KurepaVerifier::Failure>
 KurepaVerifier::verify_bounded_result(
     const core::BoundedSearchResult<arithmetic::Integer>& claimed) const {
     if (claimed.begin > claimed.end) {

@@ -4,7 +4,7 @@ namespace mathhunter::verifier {
 
 using conjectures::pigeonhole::UnsatProof;
 
-std::expected<PigeonholeVerifier::VerifiedProof, VerificationFailure>
+std::expected<PigeonholeVerifier::VerifiedProof, PigeonholeVerifier::Failure>
 PigeonholeVerifier::verify_unsat(const UnsatProof& claimed) const {
     if (claimed.pigeons == 0) {
         return std::unexpected(VerificationFailure::WitnessOutOfDomain);
@@ -41,7 +41,7 @@ PigeonholeVerifier::verify_unsat(const UnsatProof& claimed) const {
             assignment[var] = ((mask >> (var - 1)) & 1ULL) != 0;
         }
         if (sat::evaluate(cnf, assignment)) {
-            return std::unexpected(VerificationFailure::UnsatClaimRefuted);
+            return std::unexpected(PigeonholeDomainFailure::UnsatClaimRefuted);
         }
     }
 

@@ -2,9 +2,12 @@
 
 #include <concepts>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace mathhunter::verifier {
 class KurepaVerifier;
@@ -109,5 +112,41 @@ struct CandidateProof final {
 
 template <typename ProofData>
 using VerifiedProof = Verified<CandidateProof<ProofData>>;
+
+// --- ABI Phase 1: shape-level concepts -------------------------------------
+//
+// These formalize the two axes described in docs/GUIDANCE.md ("Phase 1 —
+// ABI"): claim *shape* (closed, framework-owned, checked here) versus claim
+// *domain* (open, module-owned, deliberately left as a free template
+// parameter everywhere below). Nothing on this axis should ever need to
+// name a specific conjecture module.
+
+// True for any std::expected<Payload, E> regardless of the error type E,
+// so a verifier's error type (framework-only VerificationFailure, or a
+// module's VerificationOutcome<DomainFailure>) never has to be spelled out
+// at the point a verification-backend concept is checked.
+template <typename T, typename Payload>
+concept ExpectedOf =
+    requires {
+        typename std::remove_cvref_t<T>::value_type;
+        typename std::remove_cvref_t<T>::error_type;
+    } &&
+    std::same_as<std::remove_cvref_t<T>,
+                 std::expected<Payload, typename std::remove_cvref_t<T>::error_type>>;
+
+// The outcome shape of a falsification-search discovery backend (kurepa,
+// toy_mod7): either a bounded completeness result over Domain, or a
+// counterexample witness.
+template <typename T, typename Domain, typename Witness>
+concept FalsificationSearchOutcome =
+    std::same_as<std::remove_cvref_t<T>,
+                 std::variant<BoundedSearchResult<Domain>, CandidateCounterexample<Witness>>>;
+
+// The outcome shape of a proof-search discovery backend (pigeonhole):
+// either a candidate proof, or an anomaly observation carrying AnomalyData.
+template <typename T, typename ProofData, typename AnomalyData>
+concept ProofSearchOutcome =
+    std::same_as<std::remove_cvref_t<T>,
+                 std::variant<CandidateProof<ProofData>, Observation<AnomalyData>>>;
 
 }  // namespace mathhunter::core

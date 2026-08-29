@@ -5,7 +5,7 @@ built around one non-negotiable rule: **discovery is not proof**. Every search
 result is either an unverified `Candidate*`/`Observation`, or a `Verified*`
 that can *only* be constructed by running an independent verifier.
 
-See **[GUIDANCE.md](GUIDANCE.md)** for the full design writeup: what was
+See **[GUIDANCE.md](docs/GUIDANCE.md)** for the full design writeup: what was
 implemented, why, what tradeoffs were made under the "smaller correct system"
 mandate, and a concrete list of what to build next.
 
@@ -69,9 +69,11 @@ src/core/              result-type model, hashing, binary I/O
 src/arithmetic/        exact GMP-based modular arithmetic + fast native primality
 src/certificate/       certificate file envelope (magic/version/payload/digest)
 src/sat/               CNF representation + DPLL solver
-src/conjectures/       search-side logic per conjecture (kurepa, toy_mod7, pigeonhole)
+src/framework/         module registry: the sole type-erasure boundary (ABI Phase 1)
+src/conjectures/       search-side logic and self-registration per conjecture
+                        (kurepa, toy_mod7, pigeonhole)
 src/verifier/          independent verifier per conjecture (never trusts search code)
-src/cli/               math-hunter and math-verifier entry points
+src/cli/               math-hunter and math-verifier entry points (registry-driven)
 tests/                 unit, round-trip, and adversarial/corruption tests
 conjectures/metadata/  versioned JSON metadata (never hardcoded in C++)
 certificates/examples/ sample certificates, independently re-verifiable

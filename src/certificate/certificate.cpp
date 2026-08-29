@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "mathhunter/core/byteio.hpp"
+#include "mathhunter/framework/module_registry.hpp"
 
 namespace mathhunter::certificate {
 
@@ -12,28 +13,17 @@ namespace {
 constexpr std::array<std::uint8_t, 8> kMagic{'M', 'H', 'C', 'E', 'R', 'T', 0x00, 0x01};
 constexpr std::uint16_t kFormatVersion = 1;
 
+// Whether a claim/kind is "known" is no longer a hand-edited switch over
+// every conjecture module's name (see docs/GUIDANCE.md, "Phase 1 — ABI"):
+// it is answered by asking the module registry, which each conjecture
+// module populates itself. Adding a fourth module never requires editing
+// this file.
 [[nodiscard]] bool is_known_claim(core::ClaimId claim) noexcept {
-    switch (claim) {
-        case core::ClaimId::KurepaLeftFactorial:
-        case core::ClaimId::ToyMod7:
-        case core::ClaimId::PigeonholeUnsat:
-            return true;
-        case core::ClaimId::Unknown:
-        default:
-            return false;
-    }
+    return framework::registry().has_claim(claim);
 }
 
 [[nodiscard]] bool is_known_kind(CertificateKind kind) noexcept {
-    switch (kind) {
-        case CertificateKind::KurepaCounterexample:
-        case CertificateKind::KurepaBoundedResult:
-        case CertificateKind::ToyMod7Counterexample:
-        case CertificateKind::ToyMod7BoundedResult:
-        case CertificateKind::PigeonholeUnsatResult:
-            return true;
-    }
-    return false;
+    return framework::registry().has_kind(kind);
 }
 
 }  // namespace

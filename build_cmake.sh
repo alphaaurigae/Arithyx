@@ -30,4 +30,3 @@ sync
 
 configure
 build
-

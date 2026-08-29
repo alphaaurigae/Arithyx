@@ -41,7 +41,7 @@ int main() {
         auto result = kurepa_verifier.verify_counterexample(composite);
         MH_CHECK(!result.has_value());
         if (!result.has_value()) {
-            MH_CHECK(result.error() == verifier::VerificationFailure::NotPrime);
+            MH_CHECK(result.error() == verifier::KurepaDomainFailure::NotPrime);
         }
     }
 

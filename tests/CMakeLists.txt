@@ -1,6 +1,10 @@
 function(mathhunter_add_test name)
     add_executable(${name} ${name}.cpp)
-    target_link_libraries(${name} PRIVATE mathhunter_core)
+    # See top-level CMakeLists.txt: mathhunter_core's conjecture modules
+    # self-register via [[gnu::constructor]], so every consumer -- test
+    # binaries included -- must link it with --whole-archive or module
+    # registration silently never runs.
+    target_link_libraries(${name} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,mathhunter_core>)
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME ${name} COMMAND ${name})
 endfunction()

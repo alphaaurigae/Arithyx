@@ -66,6 +66,73 @@ Phase 1 definition of done
  CertificateKind-style hand-edited switches replaced by registry dispatch
  cli/hunter_main.cpp dispatch is data-driven off the registry, not an if/else chain of hardcoded names
  Module registry exists as the only type-erasure boundary in the codebase
+Phase 1 — status: DONE (all five checklist items), implemented directly
+against kurepa/toy_mod7/pigeonhole with zero behavioral change (verified by
+the existing test suite, unmodified except one call site renamed, see
+below, plus full ASan+UBSan+LeakSanitizer and -Werror runs, plus clang-tidy
+against every new/changed translation unit).
+
+Concrete decisions made, since the sketch above was explicitly conceptual:
+
+- VerificationFailure was split exactly as this document proposed, but the
+  "generic ClaimDoesNotHold{std::string detail} variant" idea was
+  generalized one step further: a verifier's real error type is
+  `std::variant<VerificationFailure, ModuleFailure>` (wrapped as
+  `VerificationOutcome<ModuleFailure>`, include/mathhunter/verifier/
+  verification_error.hpp), with heterogeneous `operator==` against either
+  alternative so existing call sites comparing against a bare
+  VerificationFailure value keep compiling unchanged. ModuleFailure is a
+  plain module-owned enum (KurepaDomainFailure, PigeonholeDomainFailure),
+  not a string, so `to_string` stays exhaustively switch-checked per
+  module. ToyMod7Verifier needs no ModuleFailure at all and still returns
+  bare VerificationFailure — shape-optionality confirmed one phase early.
+- Correction to this document: DomainTooLargeForVerifier is not SAT-only.
+  KurepaVerifier::verify_bounded_result already returns it today
+  (kMaxBoundedRangeSize). It stays a framework/shape-level value.
+- DiscoveryBackend/VerificationBackend became concept families, not single
+  concepts, because the framework has three closed claim shapes today, not
+  one: RangeSearchDiscovery/KeyedProofSearchDiscovery (include/mathhunter/
+  framework/backend_concepts.hpp) and CounterexampleVerifier/
+  BoundedResultVerifier/UnsatProofVerifier (include/mathhunter/verifier/
+  verification_backend.hpp), all static_assert-checked against the real
+  free functions/classes in each module's *_registration.cpp. This
+  deliberately does not introduce Phase 3's WorkUnitKey opaque-bytes
+  abstraction; RangeSearchDiscovery still models a [begin,end) pair and
+  KeyedProofSearchDiscovery still models a single opaque key, matching
+  what the modules actually do today.
+- The module registry (include/mathhunter/framework/module_registry.hpp)
+  is the sole type-erasure boundary: certificate.cpp's is_known_claim/
+  is_known_kind, and both CLI binaries' search/benchmark/inspect/verify
+  dispatch, now only call ModuleRegistry. Each module registers itself
+  via a `[[gnu::constructor(N)]]`-attributed function in its own
+  src/conjectures/<id>_registration.cpp — true self-registration, not a
+  hand-maintained call list — which also means every executable linking
+  mathhunter_core must use `--whole-archive`
+  (`$<LINK_LIBRARY:WHOLE_ARCHIVE,mathhunter_core>` in CMakeLists.txt/
+  tests/CMakeLists.txt): nothing else references symbols inside a
+  *_registration.cpp translation unit, so a normal static-archive link
+  would silently drop it and the module would never register. This is the
+  one non-obvious trap in "module registers itself via static init" for a
+  static-library target; worth keeping in mind for Phase 2/3 modules too.
+  Explicit `[[gnu::constructor(1001/1002/1003)]]` priorities on
+  kurepa/toy_mod7/pigeonhole keep CLI help-text ordering identical to
+  before purely for cosmetic stability; nothing depends on this order.
+- CertificateKind's on-disk enum values were deliberately left untouched
+  (still literal per-module tags, e.g. KurepaCounterexample = 1). Making
+  the certificate *kind* space itself module-opaque is a bigger,
+  binary-format-affecting change than "replace the hand-edited switch
+  that checks/dispatches on it," which is what the Phase 1 checklist
+  actually asked for; revisit if/when Phase 3's opaque WorkUnitKey work
+  also wants an opaque on-disk kind space.
+
+Acceptance-test re-check: adding a 4th conjecture module today requires:
+a new src/conjectures/<id>.cpp + <id>_registration.cpp (auto-globbed),
+a new conjectures/metadata/<id>.json, and one new `mathhunter_add_test(...)`
+line in tests/CMakeLists.txt if it gets a test. No edits to core/result.hpp,
+certificate.hpp/.cpp, verification_error.hpp, or either CLI main. CLI help
+text, claim/kind validation, and search/benchmark/inspect/verify dispatch
+all pick it up automatically.
+
 Phase 2 — migrate the three prototypes as adversarial ABI tests
 
 Per-module pressure points, grounded in what's actually in the codebase (not hypothetical):
