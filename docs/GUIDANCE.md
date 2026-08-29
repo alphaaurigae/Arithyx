@@ -1,397 +1,182 @@
-# math-hunter — Guidance
+Phase 1 — ABI
+The two axes that must be kept separate
 
-This document is the map of the territory: what got built, why it was built
-that way, what was deliberately left out, and what to do next. It is written
-against the original task brief, which asked for a computational-mathematics
-research framework organized around one rule: **discovery is not proof**.
+Re-reading core/result.hpp, certificate.hpp, and the three modules together surfaces something worth naming explicitly, because getting it right is what makes the rest of this tractable: there are two independent axes, and only one of them is currently modeled generically.
 
-This is a **prototype**, not the finished framework the brief ultimately
-describes. It implements the brief's own "Development Order" items 1–9 in
-full (core result model → arithmetic → certificates → verifier → search →
-Kurepa → Kurepa certificate → Kurepa verification → tests), plus a working
-SAT backend and a second worked example, and stops there deliberately. The
-brief itself says: *"Do not generate enormous amounts of code merely to
-appear comprehensive. Prefer a smaller correct system over a large
-speculative framework."* Everything below was chosen with that sentence as
-the tiebreaker.
+Claim shape — already correctly generic today: Observation<T> / CandidateCounterexample<T> / VerifiedCounterexample<T,E> (falsification search), BoundedSearchResult<T> / VerifiedBoundedResult<T> (bounded completeness), CandidateProof<T> / VerifiedProof<T> (proof search). These three shapes are domain-agnostic templates and should stay a small, closed, framework-owned set — don't let a 4th module invent a 4th shape ad hoc; if one genuinely needs a new shape, that's a deliberate framework-level decision, not something a module silently bolts on.
+Claim domain — currently not modeled generically at all. It's implicit in each module's Witness/Evidence/free-function signatures. This is the axis Phase 1 actually has to build.
 
-Every claim about "this passes" or "this was tested" in this document is
-something that was actually run in the environment this was built in —
-`ctest` output, `clang-tidy` output, and sanitizer runs are described
-accurately, not aspirationally.
+The ABI's job is: make domain fully opaque to the framework, while shape stays something the framework understands (because Verified<T>'s token gate, certificate structure, and the tracker's result states all key off shape, never domain).
 
----
-
-## 1. The one rule, in code
-
-The brief's central requirement — that a search program can never mark its
-own result as proven — is enforced with the type system, not just with
-convention:
-
-```cpp
-class VerificationToken final {
-    VerificationToken() = default;         // private constructor
-    friend class mathhunter::verifier::KurepaVerifier;
-    friend class mathhunter::verifier::ToyMod7Verifier;
-    friend class mathhunter::verifier::PigeonholeVerifier;
+Contract sketch (conceptual — not for implementation yet)
+Module identity     : stable string id, matches conjectures/metadata/<id>.json
+Module metadata      : loaded at runtime from JSON (already true — keep it true)
+Discovery backend(s)  : concept-constrained type, run(WorkUnitKey) -> DiscoveryOutcome<Module>
+Verification backend(s): concept-constrained type, verify(Witness|ProofData) -> expected<Verified<...>, ...>
+Work-unit representation: module-owned opaque bytes + module-owned cost estimator
+Certificate representation: module-owned encode/decode of its own payload bytes only
+template <typename B, typename M>
+concept DiscoveryBackend = requires(B b, const typename M::WorkUnitKey& wu) {
+    { b.run(wu) } -> std::same_as<typename M::DiscoveryOutcome>;
 };
 
-template <typename Payload>
-class Verified final {
-public:
-    Verified(Payload payload, VerificationToken);   // needs a token to construct
-    ...
+template <typename B, typename M>
+concept VerificationBackend = requires(B b, const typename M::ClaimInput& in) {
+    { b.verify(in) } -> std::same_as<std::expected<core::Verified<typename M::VerifiedPayload>,
+                                                     VerificationFailure>>;
 };
-```
 
-`core::result.hpp` defines seven distinct result shapes (`Observation`,
-`CandidateCounterexample`, `VerifiedCounterexample`, `BoundedSearchResult`,
-`VerifiedBoundedResult`, `CandidateProof`, `VerifiedProof`). None of them is
-a `bool success`. The only way to obtain a `Verified<T>` anywhere in the
-codebase is to be one of the three friended verifier classes — search code
-physically cannot construct one. This is checked by the compiler, not by
-convention or code review.
+Two deliberate C++23 design decisions, both aligned with your existing preferences:
 
-(One nuance: `math-hunter` *does* link the verifier code and calls it
-automatically after a search, printing `VERIFIED` / `VERIFICATION FAILED`
-immediately. This is a deliberate reading of the brief, which asks for both
-"the verifier must be a separate executable" *and* "automatically run the
-independent verifier" on discovery — see §4.)
+Concepts, not virtual base classes, for the module contract itself. Discovery/verification are the hot path (this is exactly where "no virtual functions in hot paths, prefer CRTP/function objects" applies) — a module's DiscoveryBackend/VerificationBackend should be structurally checked at compile time, zero vtable indirection inside a search loop.
+Type erasure only at the outer boundary, i.e. exactly one place: "which module did the CLI/tracker ask for" — a small self-registering factory/registry (module registers itself via static init, framework looks it up by string id) is fine there because it's called once per job dispatch, not per candidate. This is the correct split between "must be fast" (inside a module) and "correctness/genericity matters more than speed" (module selection).
+Certificate payload becomes typed-per-family, not one schema
+struct CertificatePayload {
+    ClaimFamilyTag family;          // small closed enum the framework owns (arithmetic_residue | proof_object | opaque_external)
+    std::vector<std::byte> bytes;   // module-owned; framework never interprets contents
+};
 
----
+The outer envelope (certificate.hpp's magic/version/digest machinery) stays exactly as it is today — it's already correctly scoped to integrity/versioning, not content. The change is narrow: certificate.hpp should stop knowing about CertificateKind::KurepaCounterexample etc. by name (today it does, via the hand-edited is_known_kind switch) and instead dispatch decode/interpretation entirely into the module via the registry, keeping only the family tag generic.
 
-## 2. What was implemented
+Operationalizing your acceptance test
 
-### 2.1 Core (`src/core/`, `include/mathhunter/core/`)
-- `result.hpp` — the seven result types and the `VerificationToken` gate
-  described above, plus a `ClaimId` enum (never a raw string) identifying
-  which mathematical claim a result belongs to.
-- `hash.hpp` / `hash.cpp` — SHA-256 via OpenSSL EVP, both one-shot
-  (`sha256(...)`) and streaming (`Sha256Stream`) forms, plus
-  `constant_time_equal` for digest comparison and `to_hex` for display. Used
-  for certificate integrity and CNF identity — explicitly documented (both
-  in code-adjacent naming and in this doc) as **integrity, not proof**: a
-  hash establishes "this is the same data", never "this data is true".
-- `byteio.hpp` — bounds-checked `ByteReader`/`ByteWriter` over
-  `std::expected<T, ByteIoError>`. Every read either succeeds or returns a
-  typed error (`UnexpectedEof`, `LengthLimitExceeded`, `TrailingGarbage`);
-  nothing throws on malformed input, and nothing reads past the buffer.
-  Endianness is normalized explicitly with `std::endian`/`std::byteswap`
-  rather than assumed.
+"Can I add a completely different conjecture without modifying framework code?" is the right test but needs a checklist to actually be checkable, because some touches are expected build wiring, not contamination:
 
-### 2.2 Arithmetic (`src/arithmetic/`)
-- `modular.hpp/.cpp` — exact arithmetic on `mpz_class` (GMP): `gcd`, `mod`,
-  `mulmod`, `powmod`, `factorial_mod`, `left_factorial_mod`, and
-  `is_prime_exact`. Primality is **deterministic**, not probabilistic:
-  `is_prime_exact` runs Miller–Rabin against the fixed 12-witness set
-  `{2,3,5,7,11,13,17,19,23,29,31,37}`, which is a *proven* deterministic
-  test for all `n < 3,317,044,064,679,887,385,961,981` (~2^71.7). Past that
-  bound, the function throws `DomainError` rather than silently falling
-  back to a probabilistic test — the brief explicitly forbids probabilistic
-  evidence standing in for proof, and primality of a Kurepa witness is
-  proof-critical, so "I don't know, and I won't guess" was the only
-  acceptable failure mode.
-- `primes.hpp/.cpp` — a **second, independent** deterministic primality
-  test, written against native `uint64_t` and `unsigned __int128` instead
-  of GMP, used only by the *search* side for speed. This means the
-  search-side primality test and the verifier-side primality test
-  (`is_prime_exact`) are two different implementations of the same
-  mathematical fact, which is exactly the brief's "compare against an
-  independent implementation" requirement, built into the architecture
-  rather than bolted on as an extra check.
+Must NOT require edits (this is the actual test):
 
-### 2.3 Certificates (`src/certificate/`)
-- `certificate.hpp/.cpp` — the on-disk envelope: 8-byte magic, format
-  version, claim id, certificate kind, a length-prefixed payload (capped at
-  16 MiB), and a trailing SHA-256 digest over everything before it. Parsing
-  is fail-closed at every step: bad magic, unsupported version, unknown
-  claim/kind enum value, oversized length prefix, truncation, trailing
-  garbage after the digest, and digest mismatch are all distinct, named
-  `CertificateError` values, never exceptions, never undefined behavior.
-- `bigint_codec.hpp/.cpp` — canonical big-endian encoding of non-negative
-  `mpz_class` values via `mpz_export`/`mpz_import`, so certificates remain
-  meaningful for witnesses larger than 64 bits even though the current
-  conjecture modules don't need that range in practice.
+core/result.hpp — the three shape templates
+certificate/certificate.hpp — envelope logic
+verifier/verification_error.hpp — see finding below, this currently would need edits, which is a bug in the current design
+cli/hunter_main.cpp's command dispatch — currently an if (conjecture == "kurepa") ... else if (conjecture == "toy_mod7") ... chain, which fails this test today; it needs to become registry-driven (iterate registered modules) before Phase 1 can be called done
 
-### 2.4 SAT backend (`src/sat/`)
-- `cnf.hpp/.cpp` — a CNF representation with a canonical byte serialization
-  (used for hashing) and a direct `evaluate()` function for checking an
-  assignment against a formula.
-- `dpll_solver.hpp/.cpp` — a from-scratch DPLL solver with unit
-  propagation. This is the **search-side, untrusted, optimized** component.
-  Nothing downstream trusts its output without independent re-checking.
+Expected/acceptable to touch (build wiring, not framework contamination):
 
-### 2.5 Conjecture modules (`src/conjectures/`, one verifier each in `src/verifier/`)
+CMakeLists.txt glob already picks up new src/conjectures/*.cpp/src/verifier/*.cpp files automatically — fine
+tests/CMakeLists.txt needs one new mathhunter_add_test(...) line — fine, that's test wiring, not shared logic
+A new conjectures/metadata/<id>.json — expected, that's the whole point of metadata-driven identity
+Concrete finding: VerificationFailure already fails the Phase-2 test today
 
-| Module | Statement | Status | Search backend | Verifier backend |
-|---|---|---|---|---|
-| `kurepa` | For every odd prime `p`, `p` does not divide `K(p) = sum_{i=0}^{p-1} i!` | **Open** (real conjecture; see metadata for a note on a disputed 2022 proof claim) | sequential odd-prime search, fast native primality, GMP left-factorial-mod | independent GMP-based deterministic primality + from-scratch left-factorial-mod recomputation |
-| `toy_mod7` | For all `n` in range, `7` does not divide `n` | **Deliberately false**, a test fixture | linear scan | independent `n % 7` recomputation |
-| `pigeonhole` | `PHP(n)`: `n` pigeons can't fit in `n-1` holes | **Solved** (labeled a known-result benchmark, per the brief's explicit instruction to label solved problems as benchmarks) | DPLL solver | CNF rebuilt from `n` alone (never trusts the certificate's CNF), checked against closed-form variable/clause-count invariants, hash-compared, then confirmed UNSAT by brute-force enumeration of all `2^V` assignments |
+Re-reading include/mathhunter/verifier/verification_error.hpp: the enum mixes genuinely generic/structural failures (HashMismatch, MalformedCertificate, RangeMismatch, RangeIncomplete) with domain-specific ones (NotPrime — arithmetic-only, UnsatClaimRefuted/SatClaimRefuted/DomainTooLargeForVerifier — SAT-only). A 4th module with a genuinely different domain (say, a decider/enumeration-style claim) would either have to shoehorn its rejection reasons into this list — editing a shared header, failing the test — or leave it unedited and lose typed rejection reasons. This needs splitting before Phase 2 can honestly validate anything:
 
-Each module's search side returns a `variant` of "found a counterexample" or
-"no counterexample in this range" (or, for pigeonhole, "found a proof" vs.
-"anomaly" — see below) — never a bare boolean, and never anything the
-verifier is obligated to trust.
+Framework-owned, shape-level failures (stay in a small closed enum): digest/malformed/range-incomplete-style structural failures that apply regardless of domain.
+Module-owned domain rejection reasons: not a shared enum at all — either a module-scoped enum type parameter, or a generic ClaimDoesNotHold{std::string detail} variant carrying a domain-specific message, decided in Phase 1, then stress-tested honestly in Phase 2 rather than discovered as a surprise there.
+Phase 1 definition of done
+ DiscoveryBackend/VerificationBackend concepts formally written (not just duck-typed convention)
+ VerificationFailure split into framework/shape-level vs module-owned domain reasons
+ CertificateKind-style hand-edited switches replaced by registry dispatch
+ cli/hunter_main.cpp dispatch is data-driven off the registry, not an if/else chain of hardcoded names
+ Module registry exists as the only type-erasure boundary in the codebase
+Phase 2 — migrate the three prototypes as adversarial ABI tests
 
-**On the pigeonhole "anomaly" path:** since `PHP(n)` is a *proven* theorem,
-if the DPLL solver ever reports SAT, that is not treated as a mathematical
-discovery — it is reported as `core::Observation` with a note that this
-indicates an encoder or solver bug, exactly matching the brief's
-distinction between "observation" and every stronger result category. No
-code path allows a solver anomaly to be written to a proof certificate.
+Per-module pressure points, grounded in what's actually in the codebase (not hypothetical):
 
-**Why metadata is JSON, not C++:** `conjectures/metadata/*.json` holds the
-statement, domain, status, references, and known bounds for each claim.
-`math-hunter list`/`info` read this at runtime (`nlohmann::json`, located
-via `MATHHUNTER_METADATA_DIR` or a few conventional relative paths). This
-was a specific, explicit brief requirement ("Do not hardcode all research
-metadata into C++") and was followed literally rather than approximated
-with a `constexpr` string table.
+kurepa (arithmetic/range, falsification+bounded-completeness dual shape). WorkUnitKey = serialized [begin, end) of arithmetic::Integer (GMP-backed, arbitrary precision). Already-good precedent: BoundedSearchResult<Domain> is template-generic over Domain, not hardcoded to Integer — confirm this stays true after Phase 1's refactor.
 
-**On the Kurepa metadata's accuracy:** the statement, the 2016 verified
-bound (2^34, Andrejic & Tatarevic), and the note about the disputed 2022
-proof claim (and the earlier 2004 Barsky-Benzaghou claim that was retracted
-in 2011) were checked against current sources before being written down,
-specifically because the brief warns against ever inventing or overstating
-a mathematical record. If you update this metadata, keep it that way.
+toy_mod7 (same shape family, different witness width). This is the actual test for whether Phase 1's Witness/WorkUnitKey genericity is real: its witness is a plain uint64_t, not mpz_class. If any shared path silently assumes GMP types (it currently doesn't — bigint_codec.hpp is correctly kurepa-only, not referenced from generic certificate code — confirmed clean), that's contamination. Keep verifying this stays true as things move.
 
-### 2.6 CLI (`src/cli/`)
-Two separate binaries, `math-hunter` and `math-verifier`, sharing the same
-static library but never calling into each other's process:
-- `math-hunter list|info|search|benchmark` — discovery only.
-- `math-verifier verify|inspect` — independent verification only.
-  `inspect` deliberately does *no* verification and says so in its output,
-  so it can't be mistaken for a validity check.
+pigeonhole (SAT/proof-search, no witness at all). The real pressure test, on two fronts:
 
-### 2.7 Tests (`tests/`)
-Six suites, all passing under both a normal build and a full
-`-fsanitize=address,undefined,leak` build (GCC 13.3, C++23):
+WorkUnitKey is a single n, not a range — validates that Phase 1's opaque-bytes design doesn't secretly assume "two endpoints."
+Its claim shape is CandidateProof<UnsatProof> — there is no witness that disproves anything, only a proof object plus a formula-hash. This argues against forcing every module to define a Witness type: a module using only the proof-search shape should not need to define Witness/Evidence at all, only ProofData. Decide this explicitly in Phase 1 rather than let Phase 2 discover it needs a workaround.
 
-- `test_modular` — arithmetic primitives, known left-factorial values
-  (`!1..!5`), primality on primes/composites, the deterministic-bound
-  overflow throwing `DomainError`, cross-checks between the two independent
-  primality implementations.
-- `test_certificate_roundtrip` — write/read fidelity.
-- `test_certificate_corruption` — **adversarial**: single-bit flip, magic
-  corruption, truncation, trailing garbage, unknown claim id, empty file,
-  and an oversized length-prefix field. Every one is rejected with the
-  correct typed error.
-- `test_kurepa_verifier` — verifies a real bounded search result end to
-  end, then specifically checks that the verifier *rejects*: a tampered
-  candidate count, a fabricated non-counterexample (`p = 97`), a composite
-  passed as a witness, and `p = 2` as out-of-domain.
-- `test_toy_verifier` — same shape, cheap conjecture, exercises the
-  counterexample path (finds and verifies `n = 7`) as well as the
-  bounded-no-counterexample path.
-- `test_pigeonhole` — encoding invariants for `n = 1..5`, full search+verify
-  round trip, a hash-tamper rejection, a zero-pigeons domain rejection, a
-  capacity-exceeded case (`n = 7`, beyond the brute-force verifier's
-  `kMaxBruteForcePigeons = 6`), and a demonstration of the SAT-witness path
-  (`PHP(n, n)`, which is satisfiable, solved and independently evaluated).
+Additional contamination check already done above: sat::Cnf/sat::Clause types are correctly confined to src/sat/ and src/conjectures/pigeonhole.cpp today — none of core/, certificate/, or the generic verifier machinery reference them. Good — Phase 2 should add a lint/grep-based check (not a heavy tool, literally grep -rL for sat:: outside those two directories) to keep it that way as a regression guard, since this is exactly the kind of thing that quietly regresses during refactors.
 
-Beyond the automated suite, the full CLI pipeline was run manually end to
-end, including a certificate **hand-crafted with a Python script that never
-touched any math-hunter code**, claiming `p = 97` is a Kurepa
-counterexample — `math-verifier` rejected it with `ClaimDoesNotHold`,
-because it recomputes `K(97) mod 97` itself and gets a nonzero residue. That
-is the property the whole architecture exists to guarantee: a certificate
-is checked against the mathematics, not against its own provenance.
+Phase 2 definition of done
+ All three modules implement Phase 1's concepts with zero shared-code edits beyond the registry entry
+ pigeonhole confirmed not to require Witness/Evidence — proves shape-optionality works
+ toy_mod7 confirmed not to require GMP anywhere in shared code — proves witness-width genericity
+ Grep guard: no sat:: symbol outside src/sat/, src/conjectures/pigeonhole.cpp, src/verifier/pigeonhole_verifier.cpp
+ No performance work done in this phase — explicitly out of scope, per your "core not feature" framing
+Phase 3 — generic work unit
+struct WorkUnitKey {
+    ModuleId module;                    // registry lookup key
+    std::vector<std::byte> partition;   // module-owned encoding, opaque to framework
+};
 
-Static analysis: `clang-tidy` (`modernize-*`, `performance-*`, `bugprone-*`,
-`readability-*`, `cert-*`) runs clean (zero diagnostics) over every file in
-`src/`, with a small number of deliberate, documented suppressions in
-`.clang-tidy` (single-statement guard-clause braces, commutative-argument
-"swappable parameters" warnings, and verifier classes kept non-static as an
-extension point). Note: this sandbox's `clang-tidy` needed
-`-stdlib=libc++` to see `<expected>` at all — the installed clang's
-`__cpp_concepts` value (`201907L`) is below what libstdc++'s `<expected>`
-header guards on (`>= 202002L`); the actual GCC 13.3 build used for the real
-binaries is unaffected. This is a documented toolchain quirk of this
-sandbox, not a project defect — see the README for the exact commands.
+// module supplies, framework calls generically:
+CostEstimate estimate_cost(partition);   // opaque scheduling hint, not business logic
+DiscoveryOutcome run(partition);         // must be a pure function of `partition` alone
+std::string describe(partition);         // human-readable, debug/logging only
 
----
+Framework verbs are exactly the three you named — lease, run, report — and nothing else. The framework never branches on what a WU means.
 
-## 3. Final Quality Gate (from the brief), answered honestly
+Determinism requirement, stated explicitly as part of the contract: run(partition) must be side-effect-free and a pure function of partition (this is already true of search_range today — good precedent, just needs to become a documented, checked contract rather than an accident of how it happened to be written). This is what makes retries safe later and is the same property checkpointing needs, so it's worth locking down here rather than rediscovering in Phase 4/5.
 
-| Question | Answer |
-|---|---|
-| Can the system discover a known counterexample? | Yes — `toy_mod7` finds `n=7` on demand; this is the intended stand-in since no real Kurepa counterexample exists to discover. |
-| Can it independently verify that counterexample? | Yes, by a verifier class that never touches search code (`ToyMod7Verifier`, `KurepaVerifier`). |
-| Does modifying one bit of the certificate cause verification failure? | Yes — `test_certificate_corruption`, single-bit case, rejected via digest mismatch. |
-| Can it reproduce a known bounded mathematical result? | Yes — Kurepa bounded search over any range with no counterexample, independently re-derived by the verifier from scratch. |
-| Does the verifier reject an incomplete search? | Yes — a tampered `candidates_tested` count is rejected with `RangeIncomplete`. |
-| Does the verifier distinguish bounded verification from an unrestricted theorem? | Yes at the type level (`BoundedSearchResult<T>` is a distinct type — there is no "theorem" type at all, deliberately, because nothing in this prototype proves an unrestricted universal claim) and at the UX level (CLI output explicitly says "This is a BOUNDED result. It says nothing about primes outside this interval."). |
-| Can two independent implementations agree on the certificate? | Yes for primality (native `__int128` MR vs. GMP MR) and yes for CNF (rebuilt from `n` alone, hash-compared to the certificate's recorded hash rather than trusted). |
-| Can a SAT UNSAT result be independently checked? | Yes, by brute-force enumeration, capacity-limited and explicit about that limit (see §4). |
-| Can the SAT encoding itself be sanity-checked? | Yes — closed-form variable/clause-count invariants are checked against the encoder's actual output before any UNSAT claim is trusted. |
-| Can a search be divided into independent ranges without changing the result? | Architecturally yes (`begin`/`end` are explicit parameters everywhere, no shared mutable state); not exercised by an actual parallel/distributed run in this prototype — see §5. |
-| Can an interrupted search resume safely? | **No.** Checkpointing was explicitly deferred (brief's Development Order item 14, after the initial modules). See §5. |
-| Are all proof-critical calculations exact? | Yes — no floating point anywhere in arithmetic, certificate, or verifier code. |
-| Can malformed untrusted input crash the verifier? | Not that testing found — every parse path returns a typed error, confirmed under ASan/UBSan/LeakSan across the full test suite and a manual pass (truncation, huge length prefixes, corrupted enum values). No exhaustive fuzz harness exists yet (see §5). |
-| Can an incorrect certificate ever be accepted? | Not found in testing — this is exactly what `test_certificate_corruption`, `test_kurepa_verifier`'s rejection cases, and the hand-crafted-fabrication smoke test are aimed at. |
-| Is every mathematical claim backed by a clearly defined verification procedure? | Yes for the three implemented modules; there is no code path that reports a result without a corresponding verifier for its claim id. |
+Serialization: don't invent a second format. partition needs a self-describing wrapper (module id, format version, bytes, digest) for the same reasons certificates need one. Reuse core::ByteWriter/ByteReader — that machinery already exists, is already tested (test_certificate_corruption.cpp's adversarial cases apply equally well here), and inventing a second serialization scheme for WU keys would be exactly the kind of self-inflicted duplication this whole exercise is trying to avoid.
 
----
+Phase 3 definition of done
+ WorkUnitKey is opaque bytes + module tag, verified against all three Phase-2 modules (range-pair for kurepa/toy_mod7, single integer for pigeonhole) with no framework-level struct field named begin/end/n anywhere
+ Determinism contract documented and, ideally, exercised by a test that runs the same WU twice and diff-checks output
+ WU key serialization reuses ByteWriter/ByteReader, not a new format
+Phase 4 — tracker
 
-## 4. Deliberate deviations from the literal brief, and why
+State machine, with the failure edges made explicit (your diagram plus the branches that make it correct rather than just diagrammable):
 
-**`math-hunter` also runs verification automatically.** The brief says both
-"the verifier must be a separate executable" (hard requirement, satisfied:
-`math-verifier` is a real, independent, minimal-dependency binary that
-never invokes `math-hunter`) and "[on finding a candidate] automatically
-run the independent verifier" (a workflow requirement). Both are satisfied
-by having `math-hunter` link the same verifier *library code* and call it
-immediately after a search, while always writing a standalone certificate
-file that `math-verifier` can re-check later, from a different machine,
-with the original search program deleted. The certificate's validity never
-depends on `math-hunter` having run the check correctly — that's exactly
-what the hand-crafted-fabrication test above demonstrates.
+PENDING → LEASED → RUNNING → RESULT → VERIFIED
+            │                   │
+            ▼                   ▼
+         EXPIRED             REJECTED
+      (TTL/no heartbeat)   (verifier said no)
+            │                   │
+            ▼                   ▼
+        PENDING            PENDING (single reject, different worker)
+        (requeue,               │
+      attempt++)                ▼
+                          FLAGGED (repeated reject
+                          across independent workers —
+                          treat as a poisoned WU,
+                          not a bad client; stop requeueing,
+                          needs human review)
 
-**The SAT UNSAT verifier is brute-force, not DRAT/LRAT.** The brief allows
-this explicitly ("Investigate and support established SAT proof formats
-such as DRAT/LRAT/FRAT **where practical**"). A from-scratch DRAT checker
-is a substantial project on its own; brute-force enumeration is *simpler,
-more auditable, and requires trusting strictly less* than a proof checker
-would (a DRAT checker has to be trusted to be correct; "try every
-assignment" only has to be trusted to loop correctly). The tradeoff is
-capacity: `PigeonholeVerifier::kMaxBruteForcePigeons = 6` (30 boolean
-variables, ~10^9 assignments) is the practical ceiling on a workstation.
-Beyond that, `math-verifier` reports `DomainTooLargeForVerifier` — a
-distinct outcome from both "verified" and "rejected" — rather than silently
-trusting the solver. This is the single biggest scaling gap in the
-prototype; see §5.
+That FLAGGED branch matters for correctness, not just robustness: without distinguishing "one bad worker" from "this WU is itself malformed/impossible," a poisoned WU silently burns compute forever via infinite requeue. This is a correctness property of the tracker, not an optimization, which is why it belongs in Phase 4 rather than being deferred as a "later" concern.
 
-**Kurepa's `left_factorial_mod` takes a `uint64_t` loop bound, not an
-arbitrary-precision one.** The deterministic primality bound is ~2^71, but
-computing `K(p)` for `p` anywhere near that is computationally infeasible
-regardless of integer width — the real constraint is CPU time, not
-representable range. `try_to_u64` politely rejects (as
-`WitnessOutOfDomain`) any witness that doesn't fit, rather than silently
-truncating.
+Schema stays fully opaque, per your framing that the tracker shouldn't know what math is running:
 
-**`ClaimId`'s underlying type is `uint8_t`, encoded as `uint32_t` in the
-file format.** The in-memory enum was narrowed after a `clang-tidy
-performance-enum-size` finding; the on-disk format still reserves 4 bytes
-for the claim id so the file format has room to grow past 256 claim kinds
-without a version bump, while the in-memory type stays minimal.
+work_units(id, module_id, wu_key_bytes BLOB, state, attempt_count, cost_estimate, created_at)
+leases(id, wu_id, worker_id, leased_at, ttl_expires_at, heartbeat_at)
+results(id, wu_id, worker_id, certificate_bytes BLOB, submitted_at, verifier_state, verifier_detail,
+        UNIQUE(wu_id, worker_id))
 
----
+The UNIQUE(wu_id, worker_id) constraint is the idempotency requirement made concrete — a worker resubmitting the same result twice (retry after a dropped ack, say) must not double-count toward quorum.
 
-## 5. What's explicitly out of scope here, and the priority order to add it
+Storage stays Poco::Data+SQLite as previously discussed — no new dependency, no change from the earlier audit, this part was already right.
 
-This list is the direct continuation of the brief's "Development Order"
-(items 10 onward) plus a few things the quality-gate table above flags as
-gaps. Roughly in the order they'd pay for themselves:
+Phase 4 definition of done
+ State machine implemented with the FLAGGED branch, not just the happy path
+ Schema columns are opaque BLOBs for wu_key_bytes/certificate_bytes — tracker code never deserializes either
+ Idempotent result submission enforced at the schema level (UNIQUE constraint), not just by convention
+ Explicitly still local-only at this point — no network transport required to test the state machine; a same-process/single-SQLite-file tracker is sufficient to validate Phase 4 in isolation
+Phase 5 — distribution as a pluggable executor
 
-1. **Checkpointing.** No search in this prototype can resume. For Kurepa
-   this is low-risk to add (the search is already a pure function of
-   `[begin, end)`; a checkpoint is just "the last prime fully processed,"
-   integrity-checked the same way certificates are). Do this before
-   attempting any search range large enough to actually threaten the
-   current computational-verification record.
-2. **DRAT/LRAT proof checking for the SAT backend.** This is what actually
-   removes the `kMaxBruteForcePigeons = 6` ceiling and is the prerequisite
-   for the SAT backend being useful on anything but toy instances. A
-   minimal LRAT checker (verify each clause addition is implied by unit
-   propagation over prior clauses) is a well-scoped, well-documented
-   algorithm and is the natural next SAT-backend milestone.
-3. **A genuinely independent second CNF encoder for pigeonhole** (or for
-   whatever the next SAT-natural conjecture is), rather than the current
-   "rebuild from `n` with the same function + structural invariant check."
-   The current approach is honest about being a partial mitigation (see
-   `pigeonhole.json`'s `verification_backend` field); a hand-written
-   second encoder closes the remaining gap the brief calls out explicitly:
-   *"a formally valid UNSAT proof of the wrong CNF proves nothing."*
-4. **FLINT integration**, specifically for anything that becomes a
-   factorial-arithmetic bottleneck at scale. Not needed yet:
-   `left_factorial_mod` is not currently the bottleneck at prototype scale,
-   and the brief's own instruction is "benchmark, then optimize," not the
-   reverse.
-5. **A real parallel/distributed range-decomposition run**, even
-   single-machine, to validate the "workers are independently reproducible
-   and re-combinable" property in practice rather than just by
-   architectural argument (every search function already takes an explicit
-   `[begin, end)` and touches no shared mutable state, which is the
-   precondition — nothing about the search functions needs to change to
-   parallelize them, only the CLI/orchestration layer needs to exist).
-6. **More conjecture modules**, per the brief's "at least X" minimums that
-   were satisfied at the floor (one real open conjecture, one SAT-natural
-   benchmark, one toy fixture). Good next candidates that fit the existing
-   architecture with no new backend: other left-factorial-adjacent
-   congruence problems (the brief explicitly asks for "several modular
-   factorial conjecture modules" after Kurepa), and Ramsey-number-style
-   SAT-natural problems for the SAT backend once DRAT/LRAT exists (so the
-   new module isn't stuck at the same brute-force ceiling).
-7. **A fuzz harness** (libFuzzer/AFL over `read_certificate_file` and each
-   `decode_*_payload` function) to replace "manual adversarial test cases +
-   sanitizers" with continuous, generated adversarial input. The manual
-   corruption tests cover the failure modes we thought of; a fuzzer covers
-   the ones we didn't.
-8. **Property-based and differential tests** for the arithmetic layer
-   (e.g., `left_factorial_mod(n, m)` against a slow reference computed with
-   unbounded-precision exact factorials for small `n`, or metamorphic tests
-   like `left_factorial_mod(n, m1*m2)` consistent with the CRT combination
-   of `mod m1` and `mod m2`). The current tests are example-based
-   (known values, known primes); property tests would catch classes of bug
-   the examples happen not to exercise.
-9. **Symbolic/algebraic backend interface.** Genuinely not started. The
-   brief allows this ("optional symbolic/algebraic backend interface...
-   only implement concrete functionality where it is actually useful") and
-   nothing in the three implemented modules needs one, so it was left
-   alone rather than built as an unused abstraction.
-10. **Benchmarking suite + PGO/LTO.** `math-hunter benchmark <id>` exists
-    as a minimal timing harness for each module; there is no systematic
-    benchmark suite, flamegraph/profiling workflow, or PGO/LTO build yet.
-    Per the brief's own ordering ("profile, then optimize"), this should
-    follow real usage at a scale where it matters, not precede it.
-11. **Cluster orchestration.** Explicitly out of scope per the brief itself
-    ("Do not implement cluster infrastructure now"). The interfaces are
-    shaped for it (pure functions over explicit ranges, no shared state,
-    deterministic given `[begin, end)` and a seed) but no coordinator,
-    RPC, or job queue exists, intentionally.
+Confirmed by current research: std::execution (P2300, the scheduler/sender/receiver model with pluggable execution resources — thread-pool, single thread, GPU, io_uring, "your own") was formally adopted into C++26 at the June 2024 WG21 plenary, and a header-only, dependency-free reference implementation (stdexec, requiring only C++20) already exists and is actively used to add GPU and other scheduler backends without touching the abstraction itself. This is the community-vetted shape for exactly the problem your Phase 5 diagram describes — pluggable execution resources behind one abstraction — and it's worth deliberately mirroring rather than inventing an unrelated shape, without taking on the dependency itself yet.
 
----
+concept WorkUnitExecutor = requires(E e, const WorkUnitKey& wu) {
+    { e.submit(wu) } -> std::same_as<ExecutionHandle>;
+    { e.poll(handle) } -> std::same_as<ExecutionStatus>;
+    { e.fetch_result(handle) } -> std::same_as<std::optional<CertificatePayload>>;
+};
 
-## 6. Extending the framework
+Three implementations, all satisfying the same concept:
 
-**Adding a conjecture module** (mirrors `toy_mod7`, the simplest example):
-1. Add a `ClaimId` value in `core/result.hpp`.
-2. Add `CertificateKind` value(s) in `certificate/certificate.hpp` (and its
-   `is_known_kind`/`to_string` in the `.cpp`).
-3. Write `conjectures/<name>.hpp/.cpp`: a `Witness` type, an `Evidence`
-   type, a `search_range`-style function returning a `std::variant` of
-   "found" vs. "not found" result types, and `encode_*`/`decode_*` payload
-   functions built on `core::ByteWriter`/`ByteReader`.
-4. Write `verifier/<name>_verifier.hpp/.cpp`: friend it in
-   `core::VerificationToken`, implement `verify_*` methods that **recompute
-   independently** rather than trust the witness's attached evidence, and
-   return `std::expected<Verified<...>, verifier::VerificationFailure>`.
-5. Add a JSON file under `conjectures/metadata/` — statement, domain,
-   status, references, known bounds, sourced and checked, not invented.
-6. Wire it into `cli/hunter_main.cpp` and `cli/verifier_main.cpp`'s
-   dispatch, and add a `tests/test_<name>.cpp` with at least: a correct
-   round trip, and one deliberately-wrong witness the verifier must reject.
+LocalExecutor — direct in-process call, submit() just calls run() synchronously. This is what already exists today (math-hunter search kurepa ...) — it should remain the only executor exercised through Phases 1–4, deliberately, so the ABI/WU/tracker get validated with zero infrastructure risk before anything distributed is built.
+ClusterExecutor — talks to the Phase 4 tracker's REST surface.
+BoincExecutor — adapter mapping WorkUnitKey bytes to BOINC job templates, per the earlier audit's §3.6 mapping.
 
-**Adding a certificate type / backend / SAT encoding** follows the same
-shape: new `CertificateKind`, new payload codec next to the thing being
-certified, new verifier method that never calls into the search-side code
-for its answer.
+Recommendation: don't take a dependency on stdexec now (it's explicitly experimental, and its GPU/io_uring scheduler extensions are irrelevant here) — but write the WorkUnitExecutor concept's vocabulary (scheduler-like submit/poll/fetch split) so that if/when the project's standard target eventually moves past C++23 and std::execution ships in libstdc++/libc++, swapping in the real thing is additive, not a redesign. This costs nothing now and avoids a second painful ABI migration later — the same "don't reinvent, don't collide with where the field is already going" principle as the LRAT/Mallob finding from the earlier audit.
 
----
-
-## 7. On the legacy prototype
-
-The task referenced a legacy project (`generator.cpp`/`verifier.cpp`,
-`irreducibility_N_dev`) as "design inspiration only." It was read, but
-almost none of its structure survived: it brute-forces 2^27 assignments
-looking for random-3-SAT instances that happen to be UNSAT, wraps the
-search in classes named `KolmogorovTester` and `CircuitEnumerator` that
-don't implement Kolmogorov complexity or circuit enumeration (the first is
-just Shannon entropy of literal frequency; the second is just a
-clause/variable ratio threshold), and calls the result a "proof artifact."
-Nothing in it distinguishes discovery from proof, verifies anything
-independent of the same generator seed, or corresponds to a real
-mathematical claim — which is precisely the failure mode this brief is
-structured to prevent. It was treated as a cautionary example of what
-"looks rigorous" can hide, not as a starting point to refactor.
+Phase 5 definition of done
+ WorkUnitExecutor concept defined, LocalExecutor implemented and is the only one used through end of Phase 4
+ ClusterExecutor/BoincExecutor remain unimplemented stubs until Phases 1–4 are independently validated
+ No BOINC/MPI/network code written before this phase, full stop
+Consolidated kickoff TODO (bottom-up order, matches your priority)
+Split VerificationFailure into framework/shape-level vs module-owned domain reasons (Phase 1 finding, blocking)
+Write DiscoveryBackend/VerificationBackend concepts formally
+Make certificate.hpp dispatch by registry, not hand-edited switch statements
+Make cli/hunter_main.cpp dispatch registry-driven, not if/else on hardcoded names
+Re-migrate kurepa, toy_mod7, pigeonhole onto the new concepts, unchanged behavior, as the adversarial test
+Add the sat::-symbol grep guard as a standing regression check
+Define WorkUnitKey as opaque bytes + module tag; validate against all three modules' genuinely different partition shapes
+Reuse ByteWriter/ByteReader for WU key serialization
+Build the Phase 4 tracker state machine (including FLAGGED) against a local SQLite file, no network yet
+Define WorkUnitExecutor concept; implement LocalExecutor only
+Stop. Everything past this point (ClusterExecutor, BoincExecutor, any transport, any grid tooling) is explicitly Phase 5+ and out of scope until 1–10 are done and proven against all three prototypes with zero shared-code contamination.
