@@ -24,7 +24,8 @@ struct Evidence final {
 using SearchOutcome = std::variant<core::BoundedSearchResult<arithmetic::Integer>,
                                     core::CandidateCounterexample<Witness>>;
 
-[[nodiscard]] SearchOutcome search_range(std::uint64_t begin, std::uint64_t end);
+[[nodiscard]] SearchOutcome search_range(const arithmetic::Integer& begin,
+                                          const arithmetic::Integer& end);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_counterexample_payload(
     const core::CandidateCounterexample<Witness>& candidate);

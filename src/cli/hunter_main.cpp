@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -44,6 +46,25 @@ std::optional<std::uint64_t> parse_u64_flag(const std::vector<std::string>& args
     return std::nullopt;
 }
 
+std::optional<arithmetic::Integer> parse_integer_flag(const std::vector<std::string>& args,
+                                                        std::string_view flag) {
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] == flag) {
+            const std::string& value = args[i + 1];
+            if (value.empty() ||
+                !std::ranges::all_of(value, [](unsigned char c) { return std::isdigit(c) != 0; })) {
+                return std::nullopt;
+            }
+            try {
+                return arithmetic::Integer(value);
+            } catch (const std::invalid_argument&) {
+                return std::nullopt;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> parse_string_flag(const std::vector<std::string>& args,
                                               std::string_view flag) {
     for (std::size_t i = 0; i + 1 < args.size(); ++i) {
@@ -81,8 +102,8 @@ int cmd_info(const std::string& id) {
 }
 
 int cmd_search_kurepa(const std::vector<std::string>& args) {
-    const auto begin = parse_u64_flag(args, "--begin");
-    const auto end = parse_u64_flag(args, "--end");
+    const auto begin = parse_integer_flag(args, "--begin");
+    const auto end = parse_integer_flag(args, "--end");
     if (!begin || !end || *begin >= *end) {
         std::cerr << "search kurepa requires --begin N --end N with begin < end\n";
         return 1;

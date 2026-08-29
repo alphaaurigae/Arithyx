@@ -100,4 +100,17 @@ void for_each_prime_in_range(std::uint64_t begin, std::uint64_t end,
     }
 }
 
+void for_each_prime_in_range(const Integer& begin, const Integer& end,
+                              const std::function<bool(const Integer&)>& visitor) {
+    Integer candidate = begin < 2 ? Integer(2) : begin;
+    for (; candidate < end; ++candidate) {
+        if (is_prime_exact(candidate)) {
+            if (!visitor(candidate)) {
+                return;
+            }
+        }
+    }
+}
+
+
 }  // namespace mathhunter::arithmetic

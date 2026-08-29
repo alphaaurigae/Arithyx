@@ -100,14 +100,14 @@ Integer factorial_mod(std::uint64_t n, const Integer& modulus) {
     return acc;
 }
 
-Integer left_factorial_mod(std::uint64_t n, const Integer& modulus) {
+Integer left_factorial_mod(const Integer& n, const Integer& modulus) {
     if (modulus <= 0) {
         throw DomainError("left_factorial_mod: modulus must be positive");
     }
     Integer term = mod(Integer(1), modulus);
     Integer sum = term;
-    for (std::uint64_t k = 1; k < n; ++k) {
-        term = mulmod(term, Integer(k), modulus);
+    for (Integer k = 1; k < n; ++k) {
+        term = mulmod(term, k, modulus);
         sum = mod(sum + term, modulus);
     }
     return sum;

@@ -5,22 +5,21 @@
 
 namespace mathhunter::conjectures::kurepa {
 
-SearchOutcome search_range(std::uint64_t begin, std::uint64_t end) {
+SearchOutcome search_range(const arithmetic::Integer& begin, const arithmetic::Integer& end) {
     std::uint64_t candidates_tested = 0;
     SearchOutcome found;
     bool has_found = false;
 
-    arithmetic::for_each_prime_in_range(begin, end, [&](std::uint64_t p) {
-        if (p == 2) {
+arithmetic::for_each_prime_in_range(begin, end, [&](const arithmetic::Integer& p) {
+         if (p == 2) {
             return true;
         }
         ++candidates_tested;
-        const arithmetic::Integer modulus(p);
-        const auto residue = arithmetic::left_factorial_mod(p, modulus);
+        const auto residue = arithmetic::left_factorial_mod(p, p);
         if (residue == 0) {
             core::CandidateCounterexample<Witness> candidate;
             candidate.claim = core::ClaimId::KurepaLeftFactorial;
-            candidate.witness.p = arithmetic::Integer(p);
+            candidate.witness.p = p;
             candidate.discovered_by = std::string(kAlgorithmVersion);
             candidate.search_seed = 0;
             found = candidate;
@@ -36,8 +35,8 @@ SearchOutcome search_range(std::uint64_t begin, std::uint64_t end) {
 
     core::BoundedSearchResult<arithmetic::Integer> result;
     result.claim = core::ClaimId::KurepaLeftFactorial;
-    result.begin = arithmetic::Integer(begin);
-    result.end = arithmetic::Integer(end);
+    result.begin = begin;
+    result.end = end;
     result.candidates_tested = candidates_tested;
     result.algorithm_version = std::string(kAlgorithmVersion);
     return result;

@@ -28,7 +28,7 @@ public:
 
 [[nodiscard]] Integer factorial_mod(std::uint64_t n, const Integer& modulus);
 
-[[nodiscard]] Integer left_factorial_mod(std::uint64_t n, const Integer& modulus);
+[[nodiscard]] Integer left_factorial_mod(const Integer& n, const Integer& modulus);
 
 [[nodiscard]] bool is_prime_exact(const Integer& n);
 
