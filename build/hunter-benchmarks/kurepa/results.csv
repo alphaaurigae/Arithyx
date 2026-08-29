@@ -1,2 +1,0 @@
-begin,end,runtime_seconds,primes_tested,throughput_primes_per_second,max_rss_kb,exit_status
-3,10000,1.615429,1228,760.170,9528,0

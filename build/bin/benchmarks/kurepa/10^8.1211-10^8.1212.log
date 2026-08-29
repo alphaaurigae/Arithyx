@@ -1,5 +1,0 @@
-Searching Kurepa's left factorial conjecture over odd primes in [11321340, 11323604)...
-NO COUNTEREXAMPLE FOUND in [11321340, 11323604) (odd primes tested: 132)
-This is a BOUNDED result. It says nothing about primes outside this interval.
-Certificate written: ./build/bin/benchmarks/kurepa/10^8.1211-10^8.1212.mhout
-VERIFIED BOUNDED RESULT (independently re-derived from scratch)

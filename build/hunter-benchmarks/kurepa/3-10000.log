@@ -1,5 +1,0 @@
-Searching Kurepa's left factorial conjecture over odd primes in [3, 10000)...
-NO COUNTEREXAMPLE FOUND in [3, 10000) (odd primes tested: 1228)
-This is a BOUNDED result. It says nothing about primes outside this interval.
-Certificate written: /home/mmmm/Desktop/olddesk/own/repo-own/c++/math/math-hunter/build/hunter-benchmarks/kurepa/3-10000.out
-VERIFIED BOUNDED RESULT (independently re-derived from scratch)
