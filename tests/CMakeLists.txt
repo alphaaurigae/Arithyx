@@ -15,3 +15,6 @@ mathhunter_add_test(test_certificate_corruption)
 mathhunter_add_test(test_kurepa_verifier)
 mathhunter_add_test(test_toy_verifier)
 mathhunter_add_test(test_pigeonhole)
+
+add_test(NAME check_layering
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/check_layering.sh ${CMAKE_SOURCE_DIR})

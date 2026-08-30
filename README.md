@@ -42,6 +42,14 @@ cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 for f in src/*/*.cpp; do clang-tidy -p build "$f" --extra-arg=-stdlib=libc++; done
 ```
 
+Layering regression guard (Phase 2, docs/GUIDANCE.md): confirms `sat::`
+symbols stay confined to the SAT backend and the pigeonhole module. Runs
+automatically as a `ctest` case (`check_layering`); can also be run directly:
+
+```sh
+tests/check_layering.sh
+```
+
 ## Run
 
 ```sh
@@ -74,7 +82,8 @@ src/conjectures/       search-side logic and self-registration per conjecture
                         (kurepa, toy_mod7, pigeonhole)
 src/verifier/          independent verifier per conjecture (never trusts search code)
 src/cli/               math-hunter and math-verifier entry points (registry-driven)
-tests/                 unit, round-trip, and adversarial/corruption tests
+tests/                 unit, round-trip, and adversarial/corruption tests, plus
+                        check_layering.sh (Phase 2 sat:: containment guard)
 conjectures/metadata/  versioned JSON metadata (never hardcoded in C++)
 certificates/examples/ sample certificates, independently re-verifiable
 ```

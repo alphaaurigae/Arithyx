@@ -152,121 +152,75 @@ Phase 2 definition of done
  All three modules implement Phase 1's concepts with zero shared-code edits beyond the registry entry
  pigeonhole confirmed not to require Witness/Evidence — proves shape-optionality works
  toy_mod7 confirmed not to require GMP anywhere in shared code — proves witness-width genericity
- Grep guard: no sat:: symbol outside src/sat/, src/conjectures/pigeonhole.cpp, src/verifier/pigeonhole_verifier.cpp
+ Grep guard: sat:: may appear only within the SAT backend and explicitly SAT-dependent module/test surfaces; it must never appear in generic framework, registry, work-unit, certificate, or generic verification interfaces
  No performance work done in this phase — explicitly out of scope, per your "core not feature" framing
-Phase 3 — generic work unit
-struct WorkUnitKey {
-    ModuleId module;                    // registry lookup key
-    std::vector<std::byte> partition;   // module-owned encoding, opaque to framework
-};
+Phase 2 — status: DONE (5/5). Closes the one gap STATUS audit 1 found
+("Missing grep guard: no check_layering.sh-style script or corresponding
+ctest entry appears anywhere in tests/CMakeLists.txt or elsewhere").
 
-// module supplies, framework calls generically:
-CostEstimate estimate_cost(partition);   // opaque scheduling hint, not business logic
-DiscoveryOutcome run(partition);         // must be a pure function of `partition` alone
-std::string describe(partition);         // human-readable, debug/logging only
+Revised criterion (post-review): the checklist line above originally read
+"no sat:: symbol outside src/sat/, src/conjectures/pigeonhole.cpp,
+src/verifier/pigeonhole_verifier.cpp" — three literal paths. On review
+that wording was replaced with the semantically stronger version now
+shown, because literal-path matching and the actual architectural goal
+diverge the moment you also grep headers: `include/mathhunter/
+conjectures/pigeonhole.hpp` legitimately spells `sat::Cnf` as
+`encode_php()`'s return type, and contorting that header into an opaque
+handle purely to make a literal-path grep pass would be architecture
+driven by the guard rather than by the real module/backend boundary. The
+thing actually worth protecting is that no *SAT assumption* leaks into
+the generic layer every module sits behind — core/, framework/,
+certificate/, and the generic verifier concepts — not that the string
+`sat::` is confined to an exact file list picked before the headers were
+checked against it.
 
-Framework verbs are exactly the three you named — lease, run, report — and nothing else. The framework never branches on what a WU means.
+Concrete decisions made:
 
-Determinism requirement, stated explicitly as part of the contract: run(partition) must be side-effect-free and a pure function of partition (this is already true of search_range today — good precedent, just needs to become a documented, checked contract rather than an accident of how it happened to be written). This is what makes retries safe later and is the same property checkpointing needs, so it's worth locking down here rather than rediscovering in Phase 4/5.
-
-Serialization: don't invent a second format. partition needs a self-describing wrapper (module id, format version, bytes, digest) for the same reasons certificates need one. Reuse core::ByteWriter/ByteReader — that machinery already exists, is already tested (test_certificate_corruption.cpp's adversarial cases apply equally well here), and inventing a second serialization scheme for WU keys would be exactly the kind of self-inflicted duplication this whole exercise is trying to avoid.
-
-Phase 3 definition of done
- WorkUnitKey is opaque bytes + module tag, verified against all three Phase-2 modules (range-pair for kurepa/toy_mod7, single integer for pigeonhole) with no framework-level struct field named begin/end/n anywhere
- Determinism contract documented and, ideally, exercised by a test that runs the same WU twice and diff-checks output
- WU key serialization reuses ByteWriter/ByteReader, not a new format
-Phase 4 — tracker
-
-State machine, with the failure edges made explicit (your diagram plus the branches that make it correct rather than just diagrammable):
-
-PENDING → LEASED → RUNNING → RESULT → VERIFIED
-            │                   │
-            ▼                   ▼
-         EXPIRED             REJECTED
-      (TTL/no heartbeat)   (verifier said no)
-            │                   │
-            ▼                   ▼
-        PENDING            PENDING (single reject, different worker)
-        (requeue,               │
-      attempt++)                ▼
-                          FLAGGED (repeated reject
-                          across independent workers —
-                          treat as a poisoned WU,
-                          not a bad client; stop requeueing,
-                          needs human review)
-
-That FLAGGED branch matters for correctness, not just robustness: without distinguishing "one bad worker" from "this WU is itself malformed/impossible," a poisoned WU silently burns compute forever via infinite requeue. This is a correctness property of the tracker, not an optimization, which is why it belongs in Phase 4 rather than being deferred as a "later" concern.
-
-Schema stays fully opaque, per your framing that the tracker shouldn't know what math is running:
-
-work_units(id, module_id, wu_key_bytes BLOB, state, attempt_count, cost_estimate, created_at)
-leases(id, wu_id, worker_id, leased_at, ttl_expires_at, heartbeat_at)
-results(id, wu_id, worker_id, certificate_bytes BLOB, submitted_at, verifier_state, verifier_detail,
-        UNIQUE(wu_id, worker_id))
-
-The UNIQUE(wu_id, worker_id) constraint is the idempotency requirement made concrete — a worker resubmitting the same result twice (retry after a dropped ack, say) must not double-count toward quorum.
-
-Storage stays Poco::Data+SQLite as previously discussed — no new dependency, no change from the earlier audit, this part was already right.
-
-Phase 4 definition of done
- State machine implemented with the FLAGGED branch, not just the happy path
- Schema columns are opaque BLOBs for wu_key_bytes/certificate_bytes — tracker code never deserializes either
- Idempotent result submission enforced at the schema level (UNIQUE constraint), not just by convention
- Explicitly still local-only at this point — no network transport required to test the state machine; a same-process/single-SQLite-file tracker is sufficient to validate Phase 4 in isolation
-Phase 5 — distribution as a pluggable executor
-
-Confirmed by current research: std::execution (P2300, the scheduler/sender/receiver model with pluggable execution resources — thread-pool, single thread, GPU, io_uring, "your own") was formally adopted into C++26 at the June 2024 WG21 plenary, and a header-only, dependency-free reference implementation (stdexec, requiring only C++20) already exists and is actively used to add GPU and other scheduler backends without touching the abstraction itself. This is the community-vetted shape for exactly the problem your Phase 5 diagram describes — pluggable execution resources behind one abstraction — and it's worth deliberately mirroring rather than inventing an unrelated shape, without taking on the dependency itself yet.
-
-concept WorkUnitExecutor = requires(E e, const WorkUnitKey& wu) {
-    { e.submit(wu) } -> std::same_as<ExecutionHandle>;
-    { e.poll(handle) } -> std::same_as<ExecutionStatus>;
-    { e.fetch_result(handle) } -> std::same_as<std::optional<CertificatePayload>>;
-};
-
-Three implementations, all satisfying the same concept:
-
-LocalExecutor — direct in-process call, submit() just calls run() synchronously. This is what already exists today (math-hunter search kurepa ...) — it should remain the only executor exercised through Phases 1–4, deliberately, so the ABI/WU/tracker get validated with zero infrastructure risk before anything distributed is built.
-ClusterExecutor — talks to the Phase 4 tracker's REST surface.
-BoincExecutor — adapter mapping WorkUnitKey bytes to BOINC job templates, per the earlier audit's §3.6 mapping.
-
-Recommendation: don't take a dependency on stdexec now (it's explicitly experimental, and its GPU/io_uring scheduler extensions are irrelevant here) — but write the WorkUnitExecutor concept's vocabulary (scheduler-like submit/poll/fetch split) so that if/when the project's standard target eventually moves past C++23 and std::execution ships in libstdc++/libc++, swapping in the real thing is additive, not a redesign. This costs nothing now and avoids a second painful ABI migration later — the same "don't reinvent, don't collide with where the field is already going" principle as the LRAT/Mallob finding from the earlier audit.
-
-Phase 5 definition of done
- WorkUnitExecutor concept defined, LocalExecutor implemented and is the only one used through end of Phase 4
- ClusterExecutor/BoincExecutor remain unimplemented stubs until Phases 1–4 are independently validated
- No BOINC/MPI/network code written before this phase, full stop
-Consolidated kickoff TODO (bottom-up order, matches your priority)
-Split VerificationFailure into framework/shape-level vs module-owned domain reasons (Phase 1 finding, blocking)
-Write DiscoveryBackend/VerificationBackend concepts formally
-Make certificate.hpp dispatch by registry, not hand-edited switch statements
-Make cli/hunter_main.cpp dispatch registry-driven, not if/else on hardcoded names
-Re-migrate kurepa, toy_mod7, pigeonhole onto the new concepts, unchanged behavior, as the adversarial test
-Add the sat::-symbol grep guard as a standing regression check
-Define WorkUnitKey as opaque bytes + module tag; validate against all three modules' genuinely different partition shapes
-Reuse ByteWriter/ByteReader for WU key serialization
-Build the Phase 4 tracker state machine (including FLAGGED) against a local SQLite file, no network yet
-Define WorkUnitExecutor concept; implement LocalExecutor only
-Stop. Everything past this point (ClusterExecutor, BoincExecutor, any transport, any grid tooling) is explicitly Phase 5+ and out of scope until 1–10 are done and proven against all three prototypes with zero shared-code contamination.
-
-
----
-
-STATUS audit 1
-
-Phase 1 — DONE (5/5), matches GUIDANCE.md's own self-report and the code:
-
-RangeSearchDiscovery/KeyedProofSearchDiscovery (backend_concepts.hpp) and CounterexampleVerifier/BoundedResultVerifier/UnsatProofVerifier (verification_backend.hpp) exist and are static_assert-checked in each *_registration.cpp.
-VerificationFailure (shape-level) vs VerificationOutcome<ModuleFailure> split is real; KurepaDomainFailure/PigeonholeDomainFailure are module-owned; ToyMod7Verifier correctly returns bare VerificationFailure with no wrapper.
-certificate.cpp's is_known_claim/is_known_kind call framework::registry(), not a hand-edited switch.
-hunter_main.cpp's search/benchmark paths and usage text are registry-driven (registry().find_by_id(...), for (const auto& module : registry().modules())), no if(conjecture=="kurepa") chain remains.
-ModuleRegistry is the only place certificate.cpp and both CLI mains do lookup.
-
-Phase 2 — 4/5, matches the audit's assessment:
-
-Zero shared-code edits beyond each module's own registration file: consistent with what's shown.
-pigeonhole.hpp confirmed to define no Witness/Evidence, only UnsatProof — correct, proves shape-optionality.
-toy_mod7.hpp/.cpp use std::uint64_t throughout, no arithmetic::Integer/GMP — correct.
-Missing grep guard: no check_layering.sh-style script or corresponding ctest entry appears anywhere in tests/CMakeLists.txt or elsewhere in this file set.
+- tests/check_layering.sh runs two complementary checks, both wired into
+  `tests/CMakeLists.txt` as the `check_layering` ctest case so `ctest
+  --test-dir build` exercises them on every run:
+    1. **Allowlist scan** — every `.hpp`/`.cpp`/`.h`/`.cc` under `src/`,
+       `include/`, `tests/` (excluding `build/`, `.git/`) containing the
+       literal token `sat::` must be one of the explicitly allowed
+       SAT-dependent surfaces: `src/sat/`, `include/mathhunter/sat/`,
+       `src/conjectures/pigeonhole.cpp`, `include/mathhunter/conjectures/
+       pigeonhole.hpp`, `src/verifier/pigeonhole_verifier.cpp`, and
+       `tests/test_pigeonhole.cpp` (the last two deliberately exercise
+       `sat::` directly as part of testing the SAT-shaped module). Any
+       new file anywhere in the tree that starts saying `sat::` for any
+       other reason fails the build immediately.
+    2. **Generic-boundary assertion** — a curated, named list of the
+       files that *are* the generic contract (`core/result.hpp`,
+       `core/byteio.hpp`, `core/hash.hpp`, `framework/module_registry.*`,
+       `framework/backend_concepts.hpp`, `framework/cli_args.hpp`,
+       `certificate/certificate.*`, `certificate/bigint_codec.*`,
+       `verifier/verification_error.hpp`, `verifier/
+       verification_backend.hpp`, and — the interesting one —
+       `verifier/pigeonhole_verifier.hpp`) is individually re-checked and
+       reported by name, rather than left as "everything not on the
+       allowlist, by omission." This turns "no violation found" into a
+       positive, itemized assertion of the actual invariant, and also
+       fails loudly if one of these files is ever renamed/removed (the
+       architecture moved and the guard's own knowledge of it is stale).
+- `include/mathhunter/verifier/pigeonhole_verifier.hpp` is the deliberate
+  centerpiece of check 2, not an incidental omission from check 1: it is
+  the one header where a SAT-shaped module's *public verifier interface*
+  is exactly as generic as Kurepa's or toy_mod7's (it names only
+  `conjectures::pigeonhole::UnsatProof`), with the `sat::` dependency
+  confined entirely to the `.cpp` behind it. That split — interface
+  generic, implementation domain-specific — is the actual result Phase 2
+  set out to prove, more so than any literal path count.
+- Regression-tested both checks with positive controls, each reverted
+  after confirming failure: (a) a stray `sat::` reference injected into
+  `src/arithmetic/modular.cpp` (an unrelated, non-allowlisted file) is
+  caught by check 1 with file+line; (b) a stray `sat::` reference
+  injected into `include/mathhunter/verifier/pigeonhole_verifier.hpp`
+  (the generic-boundary centerpiece) is caught by check 1 first, since
+  it also isn't allowlisted, with the same clear file+line output; (c)
+  temporarily removing `include/mathhunter/core/hash.hpp` is caught by
+  check 2's missing-file assertion rather than silently passing. All
+  three fail loudly and specifically; the working tree was confirmed
+  byte-identical to before each control afterward.
 
 Phases 3–5 — not started: no WorkUnitKey, tracker schema, or WorkUnitExecutor/LocalExecutor code exists anywhere in the provided sources. Correct.
 
@@ -337,5 +291,12 @@ Only after Phase 3 is solid: Phase 4's tracker, schema written against whichever
 Defer Decision C (public/volunteer trust model) and any sandboxing work until there's an actual answer to "who runs the workers" — don't build it speculatively.
 Treat §6 item 2 (DRAT/LRAT for pigeonhole) as a good candidate for "next thing to implement" independent of the phase order above, since it's self-contained, doesn't touch the framework, and directly improves the one verifier with the sharpest known capacity limit today.
 
+----
 
-
+Editorial note (post-audit-2): recommended immediate next step #1 above
+("Add the Phase 2 grep-guard script") is now done — see "Phase 2 — status:
+DONE" above. Decisions A/B/C (quorum semantics, Postgres-shaped Phase 4
+schema, public-vs-internal trust model) remain open and are unchanged by
+this update; they still need an explicit answer from the project owner
+before Phase 4 work starts, per Phase 5's "no BOINC/MPI/network code
+before Phases 1-4 are proven" rule.
