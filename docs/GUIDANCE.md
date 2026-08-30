@@ -1,3 +1,153 @@
+Original phase mockup:
+"I would therefore use this order
+Phase 1 — ABI
+
+Define the minimum contract for a module:
+
+Module
+ ├── identity
+ ├── metadata
+ ├── discovery backend(s)
+ ├── verification backend(s)
+ ├── work-unit representation
+ └── certificate representation
+
+Do not optimize it yet.
+
+The test should be:
+
+Can I add a completely different conjecture without modifying framework code?
+
+If the answer is no, the ABI isn't finished.
+
+Phase 2 — migrate the three existing prototypes
+
+Don't immediately delete anything.
+
+Use the three prototypes as adversarial ABI tests:
+
+Kurepa       → arithmetic/range-style
+toy_mod7     → arithmetic/range-style
+pigeonhole   → SAT/enumeration-style
+
+The objective isn't to make them fast.
+
+The objective is:
+
+Can all three implement the same framework contract without contaminating that contract with assumptions from any one of them?
+
+If pigeonhole forces you to add "SAT stuff" to the generic interface, that's a warning.
+
+Likewise if Kurepa forces everything to have begin/end.
+
+Phase 3 — generic WU
+
+This is where I strongly agree with the audit.
+
+Don't define:
+
+struct WorkUnit {
+    uint64_t begin;
+    uint64_t end;
+};
+
+as the framework abstraction.
+
+Instead conceptually:
+
+WorkUnit
+ ├── identity
+ ├── serialized partition key
+ └── module-defined semantics
+
+The framework should be able to say:
+
+give me WU X
+run WU X
+report result for WU X
+
+without knowing whether X represents:
+
+[1000000, 2000000)
+
+or:
+
+SAT assumptions: x1=false,x7=true,...
+
+or:
+
+Turing machine IDs 18200–18300
+
+or:
+
+a graph-search partition
+
+That is the abstraction that will actually make later distributed execution straightforward.
+
+Phase 4 — tracker
+
+Only after the WU abstraction exists.
+
+Then the tracker becomes genuinely generic:
+
+PENDING
+   ↓
+LEASED
+   ↓
+RUNNING
+   ↓
+RESULT
+   ↓
+VERIFIED
+
+with retry/timeout semantics around it.
+
+The tracker shouldn't care what mathematics is being computed.
+
+Phase 5 — distribution
+
+Only here would I start thinking seriously about BOINC/MPI/etc.
+
+At that point the distributed system becomes an implementation detail:
+
+                 Framework
+                    │
+              WorkUnit API
+                    │
+       ┌────────────┼────────────┐
+       │            │            │
+    local        cluster       BOINC
+   executor       executor     executor
+
+That's much healthier than designing the framework around BOINC and subsequently discovering that a SAT cube or Turing-machine batch doesn't fit.
+
+Phase 6 — experimental discovery backends
+
+LLM/evolutionary search should be treated exactly as the audit suggests:
+
+DiscoveryBackend
+       │
+       ├── brute force
+       ├── heuristic
+       ├── SAT
+       ├── evolutionary
+       └── LLM-guided
+
+All of them have exactly the same authority:
+
+none.
+
+They generate candidates.
+
+The verifier decides.
+
+That is an excellent property for this kind of project because you can eventually throw increasingly insane discovery algorithms at the framework without having to expand the trust boundary."
+
+
+------------------------------
+
+Actual phase progress
+
 Phase 1 — ABI
 The two axes that must be kept separate
 
