@@ -247,3 +247,95 @@ Reuse ByteWriter/ByteReader for WU key serialization
 Build the Phase 4 tracker state machine (including FLAGGED) against a local SQLite file, no network yet
 Define WorkUnitExecutor concept; implement LocalExecutor only
 Stop. Everything past this point (ClusterExecutor, BoincExecutor, any transport, any grid tooling) is explicitly Phase 5+ and out of scope until 1–10 are done and proven against all three prototypes with zero shared-code contamination.
+
+
+---
+
+STATUS audit 1
+
+Phase 1 — DONE (5/5), matches GUIDANCE.md's own self-report and the code:
+
+RangeSearchDiscovery/KeyedProofSearchDiscovery (backend_concepts.hpp) and CounterexampleVerifier/BoundedResultVerifier/UnsatProofVerifier (verification_backend.hpp) exist and are static_assert-checked in each *_registration.cpp.
+VerificationFailure (shape-level) vs VerificationOutcome<ModuleFailure> split is real; KurepaDomainFailure/PigeonholeDomainFailure are module-owned; ToyMod7Verifier correctly returns bare VerificationFailure with no wrapper.
+certificate.cpp's is_known_claim/is_known_kind call framework::registry(), not a hand-edited switch.
+hunter_main.cpp's search/benchmark paths and usage text are registry-driven (registry().find_by_id(...), for (const auto& module : registry().modules())), no if(conjecture=="kurepa") chain remains.
+ModuleRegistry is the only place certificate.cpp and both CLI mains do lookup.
+
+Phase 2 — 4/5, matches the audit's assessment:
+
+Zero shared-code edits beyond each module's own registration file: consistent with what's shown.
+pigeonhole.hpp confirmed to define no Witness/Evidence, only UnsatProof — correct, proves shape-optionality.
+toy_mod7.hpp/.cpp use std::uint64_t throughout, no arithmetic::Integer/GMP — correct.
+Missing grep guard: no check_layering.sh-style script or corresponding ctest entry appears anywhere in tests/CMakeLists.txt or elsewhere in this file set.
+
+Phases 3–5 — not started: no WorkUnitKey, tracker schema, or WorkUnitExecutor/LocalExecutor code exists anywhere in the provided sources. Correct.
+
+Spot-checked specific technical citations in the audit, all verified correct against code:
+
+[[gnu::constructor(1001/1002/1003)]] priorities on kurepa/toy_mod7/pigeonhole registration — exact match.
+CertificateKind values still literal (KurepaCounterexample = 1, etc.) — exact match.
+KurepaVerifier::verify_bounded_result returning DomainTooLargeForVerifier via kMaxBoundedRangeSize — exact match, supports the "not SAT-only" correction.
+PigeonholeVerifier::kMaxBruteForcePigeons = 6 and the v >= 63 brute-force ceiling — exact match.
+The Kurepa CLI's "re-run with an independently authored verifier" print statement, cited as evidence for Decision A — exact match in kurepa_registration.cpp.
+sat:: usage confined to src/sat/, src/conjectures/pigeonhole.cpp, src/verifier/pigeonhole_verifier.cpp — consistent with what's shown (pigeonhole_registration.cpp doesn't reference sat:: directly, so the audit's suggestion to add it to the allowlist is a forward-looking recommendation, not a claim about current violation).
+
+One assumption I have to flag: the "grep guard is missing" conclusion (and thus the whole "4/5" Phase 2 score) is only as good as the assumption that the file set given to me is the complete repository. If there's a tests/check_layering.sh or similar CI script that simply wasn't included in this document bundle, that specific line item would already be satisfied. Everything else in the audit doesn't depend on that assumption.
+
+----
+
+STATUS AUDIT 2
+
+The whole-archive/[[gnu::constructor]] self-registration pattern is a real, sharp trap for a static-library architecture, and Phase 3's WorkUnitKey work and Phase 5's pluggable executors are both going to want modules to register more than just a ModuleDescriptor (cost estimators, executors, eventually maybe out-of-process backends). Worth writing this down explicitly as a constraint on Phase 3+ rather than rediscovering it: any new thing a module self-registers must go through the same registry, not a second ad hoc static-init mechanism, or the whole-archive linking requirement silently stops being sufficient and things register inconsistently depending on which .o happened to get pulled in by something else.
+ 
+2. Phase 3 — generic work unit: refined plan
+ 
+The original sketch is sound. Two refinements based on Phase 1 experience:
+ 
+3.1 — Don't let partition bytes become a second certificate format by accident. The doc already says "reuse ByteWriter/ByteReader, don't invent a second format" — the concrete risk is partition's bytes and a certificate payload's bytes drifting into being structurally the same thing (module id + versioned encode/decode) without being literally the same code path. Recommendation: give certificate.hpp and the new work_unit.hpp a shared small EncodedBlob { std::uint16_t schema_version; std::vector<std::uint8_t> bytes; } primitive with one digest-and-frame function, so "versioned opaque bytes with a digest" is implemented exactly once and both certificates and work units are call sites, not two parallel implementations that will inevitably diverge.
+ 
+3.2 — Determinism needs a test, not just a contract. The doc already flags this as "ideally exercised by a test." Make it non-optional: any module registering a RangeSearchDiscovery/KeyedProofSearchDiscovery should get one shared, framework-provided determinism test that just calls run(partition) twice and diff-checks — this belongs in the registry's static_assert-checked contract from Phase 1 (add a requires clause isn't possible for "is pure," but a runtime ctest fixture that iterates framework::registry().modules() and re-runs each one's last-known WU twice is cheap and catches an entire class of "silently became stateful" bugs Phase 4's retry logic will depend on being absent).
+ 
+3. Phase 4 — tracker: refined plan + decisions needed
+ 
+The state machine and schema in the doc are good and I wouldn't change them structurally. Two things need a decision from you before Phase 4 can start, because they change the schema:
+ 
+Decision A — what "VERIFIED" is allowed to mean across a distributed swarm. Today, single-process, Verified<T>'s token can only be constructed by the one verifier class that ships in the binary. Once results come from untrusted or merely unaudited workers, "the tracker's own single verifier said yes" is a much weaker claim than what the project's core principle ("discovery is not proof") implies. Concretely: does results.verifier_state = VERIFIED in the Phase 4 schema mean (a) one verifier run, trusted because it's the tracker's own code, or (b) N independently-invoked verifier runs (possibly by different worker processes, or by the tracker itself re-running the verifier out of an abundance of caution) that agree? (b) is more expensive and slower to reach FLAGGED/VERIFIED but is the honest extension of what the CLI already does today (see the Kurepa search output's own text: "re-run with an independently authored verifier before announcing anything" — right now that's a human instruction in a print statement, not an enforced property). I'd lean towards (b) with a configurable quorum (default 1, so today's behavior is the default), specifically because "not enforcing it" is a decision that's very hard to retrofit later without a schema migration, whereas "support quorum=1 today, raise it later" costs nothing now. Flagging this as a real design fork, not a formality — I don't think there's a clearly-correct default here, it depends on how much you trust your own worker fleet.
+ 
+Decision B — persistence choice. The doc says Poco::Data+SQLite, matching your library-priority ordering (poco > nlohmann > flint > gmp > ...). That's fine for Phase 4's explicitly local-only, single-file validation goal. It will not survive contact with concurrent writers once Phase 5 adds a real ClusterExecutor — SQLite's single-writer model means the tracker process becomes a hard bottleneck and single point of failure the moment more than one tracker instance needs to exist (e.g. for HA). That's fine to defer, but worth deciding now whether Phase 4's schema is meant to be the final schema (in which case, design it against Postgres semantics even if SQLite is what runs first) or explicitly a throwaway prototype schema you expect to redo in Phase 5. I'd design Phase 4's schema to be Postgres-compatible from day one — same DDL runs on both, UNIQUE(wu_id, worker_id) and the state-machine columns are portable — and only decide the actual production database when Phase 5's ClusterExecutor is real. This costs nothing extra now and avoids a second schema migration later.
+ 
+4. Phase 5 — pluggable executor: refined plan + decisions needed
+ 
+The WorkUnitExecutor concept and the three-implementation plan (Local/Cluster/Boinc) are good. One addition worth deciding before writing ClusterExecutor:
+ 
+Decision C — trust model: internal cluster or public volunteer compute? BoincExecutor in the original doc implies the latter is at least on the table eventually. This is a fork in the road that changes almost everything downstream of it: an internal cluster can trust workers (no sandboxing needed beyond normal process isolation, results can be merely audited); public/volunteer compute (BOINC-style, or a public-bounty model) means a worker can be actively adversarial, not just buggy, which pushes Decision A firmly towards quorum > 1 as non-optional, and adds a whole track of work this document's phases don't currently cover: hermetic sandboxing per work unit (the WU's partition bytes are the entire input, and run() is documented as pure — that purity contract is exactly what makes sandboxing tractable: no network, no filesystem, bounded memory/CPU, seccomp or a container per WU), and almost certainly cryptographic worker identity/reputation rather than a bare worker_id string. I would not build sandboxing speculatively before this is decided — it's real engineering cost with no payoff for an internal-cluster-only deployment — but the WorkUnitKey/pure-function contract Phase 3 is about to lock in is precisely the thing that makes sandboxing possible later without another ABI break, so Phase 3 is the last cheap point to confirm "yes, run() really must stay pure, with no exceptions for convenience" before it's load-bearing for security rather than just correctness.
+ 
+5. Cross-cutting production tracks (not owned by any single phase)
+ 
+These aren't in the original phase plan at all — they're the gap between "the ABI/tracker/executor design is sound" and "this is something you'd actually run." None of them block Phase 3; all of them block calling this "production."
+ 
+Observability. Nothing currently logs anything structured — CLI output is for a human at a terminal. A tracker with retrying workers and a FLAGGED state needs structured, queryable logs/metrics (WU lease/expire/reject counts per module, verifier disagreement rate) or FLAGGED WUs become invisible until someone thinks to look.
+Configuration. Today everything is CLI flags and env vars (MATHHUNTER_METADATA_DIR). A tracker process needs a real config story (DB connection, TTLs, quorum, per-module resource limits) separate from one-shot CLI ergonomics.
+On-disk format versioning discipline. CertificateFile::format_version exists but nothing exercises "read a v1 certificate with a binary that knows about v2" — worth a test the moment there's any reason to bump the version, so the version field is a tested contract, not a field that's there in case.
+Threat model, written down explicitly. Even for an internal-cluster deployment: what happens if a worker process is compromised, not just buggy? Decision A/C above are the two biggest levers here; the answer should be a short document, not implicit in code.
+Packaging/build reproducibility. .clang-tidy, sanitizer builds, and -Werror are already good CI-grade signal; formalize them as an actual CI pipeline (GitHub Actions or equivalent) running the full matrix (regular + sanitized + clang-tidy) on every change, since right now that's a set of commands in the README a human has to remember to run.
+6. The "novel attempt" — what would actually differentiate this
+ 
+The project's stated non-negotiable — "discovery is not proof," enforced by Verified<T>'s constructor-private token — is a genuinely uncommon design choice. Most prior art in this space (GIMPS, PolyMath-style distributed collaboration, general BOINC projects, SAT-competition infrastructure) treats "a worker reported a result" and "the result is trustworthy" as the same event, or separates them only by convention/manual review, not by the type system. That's the real differentiator here, and it's worth deliberately sharpening rather than diluting as the system grows. Concrete proposals, roughly in order of cost:
+ 
+Make quorum-based independent re-verification (Decision A) the headline feature of Phase 4, not an afterthought. The FLAGGED state in the tracker diagram already gestures at "distinguish a bad worker from a poisoned WU" — extend that same instinct to verification itself: a claim isn't VERIFIED because one process said so, it's VERIFIED because N structurally-independent verifier runs agree, where "structurally independent" can start as "same code, different worker/process" and later mean "different, independently-authored verifier implementation" (the Kurepa CLI text already asks a human to do this manually today).
+Replace pigeonhole's brute-force-only UNSAT verification with a real DRAT/LRAT proof pipeline (a modern CDCL solver emitting a DRAT certificate, checked by an independently-authored external checker like drat-trim or cake_lpr) for instances beyond kMaxBruteForcePigeons. This directly removes the current verifier's sharpest limitation (DomainTooLargeForVerifier at 6 pigeons) and is a natural fit for the module-owned-domain-failure ABI Phase 1 just built: pigeonhole gets a second verification backend, framework code doesn't change.
+Certificate transparency log. The SHA-256 digest machinery already in certificate.hpp is one step from a Merkle-tree append-only log of every VERIFIED result across the whole tracker — tamper-evident, independently auditable by anyone without trusting the tracker operator, in the same spirit as Certificate Transparency for TLS certs. This is a genuinely novel angle for a math-conjecture-hunting framework specifically (I'm not aware of prior art combining this with distributed conjecture search) and composes naturally with Phase 4's existing results table — it's an additional derived artifact, not a schema change.
+Formal-proof-assistant export for verified number-theoretic claims (Kurepa-shaped modules specifically): once a claim is Verified<T>, optionally emit a Lean 4 / mathlib-checkable artifact for the underlying arithmetic fact, so "verified" can eventually mean "independently checked by a widely-trusted external kernel," not just "this framework's own second recomputation agreed with its first." This is the most expensive item on this list and I would not start it before 1–3 are real; flagging it because it's the natural ceiling of "discovery is not proof" taken all the way, and it's worth having in view even if it's a Phase 6+ concern.
+ 
+None of 1–4 require reopening Phase 1's ABI — that's the actual payoff of having done Phase 1 correctly: the module-owned-domain-failure split and the registry's kind-ops dispatch already have room for "a module offers more than one verifier" and "a module's certificate kind carries an optional extra proof artifact" without another framework-wide refactor.
+ 
+7. Recommended immediate next steps, in order
+Add the Phase 2 grep-guard script (§1.1) — small, closes out Phase 2 honestly.
+Get an explicit answer on Decision A (quorum) and Decision B (Postgres-shaped schema now vs. later) — both are cheap to decide now and expensive to retrofit.
+Start Phase 3 (WorkUnitKey, §2), with the shared EncodedBlob primitive and the determinism ctest fixture built in from the start rather than added after.
+Only after Phase 3 is solid: Phase 4's tracker, schema written against whichever answer Decision B got.
+Defer Decision C (public/volunteer trust model) and any sandboxing work until there's an actual answer to "who runs the workers" — don't build it speculatively.
+Treat §6 item 2 (DRAT/LRAT for pigeonhole) as a good candidate for "next thing to implement" independent of the phase order above, since it's self-contained, doesn't touch the framework, and directly improves the one verifier with the sharpest known capacity limit today.
+
+
+
