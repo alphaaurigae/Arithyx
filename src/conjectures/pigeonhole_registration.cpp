@@ -1,5 +1,6 @@
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,81 @@ using framework::cli_args::parse_u64_flag;      // NOLINT
 static_assert(framework::KeyedProofSearchDiscovery<decltype(&search_unsat_benchmark),
                                                      std::uint32_t, UnsatProof, std::uint32_t>);
 static_assert(verifier::UnsatProofVerifier<verifier::PigeonholeVerifier, UnsatProof>);
+
+constexpr std::string_view kModuleId = "pigeonhole";
+
+core::EncodedBlob encode_pigeon_partition(std::uint32_t pigeons) {
+    core::ByteWriter w;
+    w.put_le<std::uint32_t>(pigeons);
+    return core::EncodedBlob{.schema_version = 1, .bytes = std::move(w).take()};
+}
+
+std::expected<std::uint32_t, std::string> decode_pigeon_partition(const core::EncodedBlob& blob) {
+    core::ByteReader r(blob.bytes);
+    auto pigeons = r.get_le<std::uint32_t>();
+    if (!pigeons) return std::unexpected("malformed pigeonhole work unit: bad pigeon count");
+    if (auto e = r.expect_end(); !e) {
+        return std::unexpected("malformed pigeonhole work unit: trailing bytes");
+    }
+    return *pigeons;
+}
+
+std::expected<framework::WorkUnitKey, std::string> pigeonhole_make_from_cli(
+    const std::vector<std::string>& args) {
+    const auto pigeons = parse_u64_flag(args, "--pigeons");
+    if (!pigeons || *pigeons == 0 || *pigeons > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected("work pigeonhole requires --pigeons N (N >= 1)");
+    }
+    return framework::WorkUnitKey{
+        .module_id = std::string(kModuleId),
+        .partition = encode_pigeon_partition(static_cast<std::uint32_t>(*pigeons))};
+}
+
+framework::WorkUnitCost pigeonhole_estimate_cost(const framework::WorkUnitKey& key) {
+    auto pigeons = decode_pigeon_partition(key.partition);
+    return framework::WorkUnitCost{.units = pigeons ? *pigeons : 0};
+}
+
+std::vector<framework::WorkUnitKey> pigeonhole_partition(const framework::WorkUnitKey& key,
+                                                           std::uint64_t /*target_units*/) {
+    return {key};
+}
+
+framework::WorkUnitOutcome pigeonhole_run(const framework::WorkUnitKey& key) {
+    auto pigeons = decode_pigeon_partition(key.partition);
+    if (!pigeons) {
+        return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::Anomaly,
+                                           .certificate_kind = std::nullopt,
+                                           .payload = {},
+                                           .diagnostic = pigeons.error()};
+    }
+    const auto outcome = search_unsat_benchmark(*pigeons);
+    if (std::holds_alternative<core::Observation<std::uint32_t>>(outcome)) {
+        const auto obs = std::get<core::Observation<std::uint32_t>>(outcome);
+        return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::Anomaly,
+                                           .certificate_kind = std::nullopt,
+                                           .payload = {},
+                                           .diagnostic = obs.note};
+    }
+    const auto candidate = std::get<core::CandidateProof<UnsatProof>>(outcome);
+    return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::BoundedCompletion,
+                                       .certificate_kind =
+                                           certificate::CertificateKind::PigeonholeUnsatResult,
+                                       .payload = encode_unsat_proof_payload(candidate),
+                                       .diagnostic = {}};
+}
+
+framework::SilentVerifyOutcome verify_unsat_result_quiet(std::span<const std::uint8_t> payload) {
+    auto decoded = decode_unsat_proof_payload(payload);
+    if (!decoded) return framework::SilentVerifyOutcome::Rejected;
+    verifier::PigeonholeVerifier pv;
+    auto result = pv.verify_unsat(decoded->proof);
+    if (result) return framework::SilentVerifyOutcome::Verified;
+    if (result.error() == verifier::VerificationFailure::DomainTooLargeForVerifier) {
+        return framework::SilentVerifyOutcome::Unverifiable;
+    }
+    return framework::SilentVerifyOutcome::Rejected;
+}
 
 int run_search(const std::vector<std::string>& args) {
     const auto pigeons = parse_u64_flag(args, "--pigeons");
@@ -118,7 +194,12 @@ void register_module() {
     descriptor.run_benchmark = &run_benchmark;
     descriptor.kinds.push_back({.kind = certificate::CertificateKind::PigeonholeUnsatResult,
                                  .inspect = &inspect_unsat_result,
-                                 .verify = &verify_unsat_result});
+                                 .verify = &verify_unsat_result,
+                                 .verify_quiet = &verify_unsat_result_quiet});
+    descriptor.work_unit = framework::WorkUnitOps{.make_from_cli = &pigeonhole_make_from_cli,
+                                                    .estimate_cost = &pigeonhole_estimate_cost,
+                                                    .partition = &pigeonhole_partition,
+                                                    .run = &pigeonhole_run};
     framework::registry().register_module(std::move(descriptor));
 }
 

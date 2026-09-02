@@ -1,3 +1,5 @@
+#include <Poco/JSON/Stringifier.h>
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -31,8 +33,8 @@ int cmd_list() {
     for (const auto& id : ids) {
         auto meta = cli::load_conjecture_metadata(id);
         if (!meta) continue;
-        std::cout << id << "\t" << meta->value("name", "?") << "\t[" << meta->value("status", "?")
-                   << "]\n";
+        std::cout << id << "\t" << (*meta)->optValue<std::string>("name", "?") << "\t["
+                   << (*meta)->optValue<std::string>("status", "?") << "]\n";
     }
     return 0;
 }
@@ -43,7 +45,8 @@ int cmd_info(const std::string& id) {
         std::cerr << "Unknown conjecture or metadata not found: " << id << "\n";
         return 1;
     }
-    std::cout << (*meta).dump(2) << "\n";
+    Poco::JSON::Stringifier::stringify(*meta, std::cout, 2);
+    std::cout << "\n";
     return 0;
 }
 

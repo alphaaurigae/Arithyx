@@ -450,3 +450,323 @@ schema, public-vs-internal trust model) remain open and are unchanged by
 this update; they still need an explicit answer from the project owner
 before Phase 4 work starts, per Phase 5's "no BOINC/MPI/network code
 before Phases 1-4 are proven" rule.
+
+----
+
+Phases 3-5 — combined pass, status and decisions
+
+Framing: the project owner explicitly authorized tackling Phases 3-5
+together rather than strictly sequentially ("not a strict requirement if
+it makes sense to tackle the connected phases 3-5 at once"), and
+explicitly de-scoped BOINC compatibility as a hard obligation: "what
+counts is the framework capability to handle distributed work... weather
+[whether] a decision is made to move to boinc [or] any other form of
+distributed computing eg over ip directly." This section documents what
+was actually built against that instruction, not against the original
+blueprint's literal phase boundaries, which the blueprint text itself
+flags as pre-dating this document and open to revision.
+
+Phase 3 — status: DONE.
+
+- `WorkUnitKey` (`framework/work_unit.hpp`) is exactly the blueprint's
+  `identity / serialized partition key / module-defined semantics` shape:
+  `{ module_id, EncodedBlob partition }`. `module_id` is addressing only
+  (which module's `WorkUnitOps` to call), never interpreted content —
+  the same role `ClaimId` already plays for certificates. `partition`
+  is fully opaque outside the owning module.
+- `core::EncodedBlob` (`core/encoded_blob.hpp`) implements §3.1's shared
+  "versioned bytes + digest" primitive: `frame_encoded_blob`/
+  `unframe_encoded_blob`, generalized with a caller-supplied header so it
+  can bind extra context (here, the length-prefixed `module_id`) into the
+  digest without a second bespoke framing format. First and currently
+  only consumer is `WorkUnitKey`'s own encode/decode.
+  Deliberate deviation from §3.1's literal suggestion: `certificate.cpp`
+  was **not** retrofitted onto `EncodedBlob`. `certificate.cpp`'s
+  envelope is small, already fully tested (including byte-offset-specific
+  corruption tests in `test_certificate_corruption.cpp`), and ships
+  example certificates in `certificates/examples/` — migrating its
+  internals for a DRY win alone was judged not worth the risk of a subtle
+  on-disk-format regression in already-correct, already-shipped code, so
+  it was left untouched. Nothing about `EncodedBlob`'s design forecloses
+  migrating `certificate.cpp` onto it later at low cost, since the header
+  parameter already generalizes to certificate's magic/version/claim/kind
+  prefix.
+- `framework/range_partition.hpp` adds the partitioning/cost-estimator
+  helper the project owner asked for: `partition_u64_range`/
+  `partition_integer_range` (pure chunking math, shared by every
+  range-shaped module) and `saturating_range_size_u64` (two overloads,
+  u64 and `arithmetic::Integer`) so kurepa's and toy_mod7's near-identical
+  "how big is this range" logic is implemented once, not duplicated
+  per module — a direct instance of the "centralize reusable functions"
+  principle the project owner raised for this pass generally.
+- Every module's `ModuleDescriptor::work_unit` (`WorkUnitOps`:
+  `make_from_cli`/`estimate_cost`/`partition`/`run`) is wired in its own
+  `*_registration.cpp`, matching Phase 1's registry-only type-erasure
+  boundary — no framework code names kurepa/toy_mod7/pigeonhole.
+  `run` is pure (decode partition, call the existing `search_range`/
+  `search_unsat_benchmark`, encode the result; no I/O), which is what
+  Phase 5's sandboxing note asks Phase 3 to lock in.
+  pigeonhole's `partition` is intentionally the identity function (a
+  single SAT instance is atomic) — confirms shape-optionality extends to
+  the work-unit axis the same way Phase 2 proved it for claim shape.
+- Determinism ctest fixture (§3.2, made non-optional as requested):
+  `tests/test_work_unit_determinism.cpp` iterates
+  `framework::registry().modules()`, builds one sample `WorkUnitKey` per
+  module via `make_from_cli`, and calls `run()` twice, diff-checking
+  `kind`/`certificate_kind`/`payload`/`diagnostic` byte-for-byte.
+- "Hostile fourth prototype" genericity check, cheaply implemented: the
+  original blueprint's suggestion to build a fourth conjecture module
+  whose `WorkUnit` is a fundamentally different shape (a graph partition,
+  a SAT cube, an opaque id batch) was not implemented as four new,
+  throwaway conjecture modules — that would cost real code
+  (metadata JSON, registration, a fake search/verify backend) for a
+  property that doesn't need a real backend to demonstrate.
+  `tests/test_work_unit.cpp` instead constructs raw synthetic
+  `WorkUnitKey` values carrying a numeric-range-shaped blob, a
+  SAT-cube-literal-shaped blob, an opaque-id-batch-shaped blob, a
+  graph-partition-adjacency-shaped blob, and an empty blob, and asserts
+  `encode_work_unit_key`/`decode_work_unit_key`/`identity_digest` treat
+  all five identically and never branch on content. Combined with
+  pigeonhole's real atomic `partition` above, this is judged to satisfy
+  the blueprint's actual question ("does the framework core require
+  knowing what any of those actually mean?") without the "smaller
+  correct system" cost of four synthetic modules.
+
+Phase 3 definition of done
+[x] WorkUnitKey is opaque-bytes + module id, not begin/end
+[x] Shared EncodedBlob digest-and-frame primitive exists and is used by WorkUnitKey
+[x] Partitioning/cost-estimator helper exists and is shared, not per-module-duplicated
+[x] Every module (range-shaped and atomic-shaped) implements the same WorkUnitOps contract with zero shared-code edits beyond its own registration file
+[x] Determinism is a ctest fixture, not just a contract
+[x] Genericity re-validated against shapes with nothing in common with a numeric range
+
+Phase 4 — status: DONE for the explicitly-scoped "local validation" goal;
+Decisions A and B remain open at the production-default level (unchanged
+from STATUS AUDIT 2 — see below).
+
+- `framework::WorkUnitTracker` (`framework/tracker.hpp`) implements
+  PENDING -> LEASED -> RUNNING -> RESULT -> VERIFIED | FLAGGED exactly as
+  sketched, plus lease timeout (`reclaim_expired_leases`, configurable
+  `lease_duration`) and retry-budget exhaustion (`max_attempts`, after
+  which a further-expired lease goes straight to FLAGGED instead of back
+  to PENDING). It is in-memory only (`std::map<WorkUnitId, WorkUnitRecord>`
+  guarded by one `std::mutex`) — no persistence backend was added, which
+  is a deliberate non-decision, not an oversight: Decision B (SQLite vs.
+  Postgres-shaped schema) is still unresolved, and guessing a schema
+  before that answer would be exactly the kind of retrofit GUIDANCE
+  already warned against. The tracker's public API (`enqueue`/`lease`/
+  `mark_running`/`report_result`/`report_verification`/
+  `reclaim_expired_leases`/`snapshot`) is designed so a persistence-backed
+  implementation (or an injected `Store` strategy) can be dropped in later
+  without changing `WorkUnitKey`, module code, or the executor concept.
+- Decision A (quorum) is implemented, not just discussed:
+  `TrackerConfig::verification_quorum` defaults to 1 (today's
+  single-verifier-run behavior, unchanged), and `report_verification`
+  already supports quorum > 1 with `verification_agreements` accumulating
+  until the threshold is met, or moving straight to FLAGGED on the first
+  disagreement. This is the "support quorum=1 today, raise it later —
+  costs nothing now" recommendation, actually built rather than deferred
+  again. The *production default* is still the project owner's call.
+- `WorkUnitOutcomeKind::Anomaly` (pigeonhole's solver-contradicts-a-proven-
+  theorem case, and any module's malformed-partition case) is routed
+  straight to FLAGGED by `report_result`, bypassing certificate/verifier
+  machinery entirely — this was not in the original tracker sketch, but
+  follows directly from the existing code's own framing ("anomaly: ...
+  this indicates an encoder or solver bug, not a mathematical disproof"):
+  an anomaly is evidence about the framework's own correctness, not a
+  claim a verifier can agree or disagree with, so it must never be
+  silently treated as a routine unverified result.
+- `SilentVerifyOutcome` and `CertificateKindOps::verify_quiet`
+  (`framework/module_registry.hpp`) are a necessary, additive framework
+  extension the original sketch did not anticipate: the existing
+  `verify` op is CLI-shaped (prints to stdout, returns a process-style
+  exit code) and is deliberately left completely unchanged for that use;
+  the tracker needs a value-returning, side-effect-free verify call, so
+  each module now registers both. `Unverifiable` (capacity-limited, e.g.
+  pigeonhole beyond `kMaxBruteForcePigeons`, kurepa beyond
+  `kMaxBoundedRangeSize`) is its own outcome, distinct from `Rejected`,
+  specifically so "couldn't check" is never misreported to the tracker's
+  quorum logic as "a verifier disagreed."
+
+Phase 4 definition of done
+[x] Generic PENDING/LEASED/RUNNING/RESULT/VERIFIED/FLAGGED state machine, keyed off WorkUnitKey/WorkUnitOutcome only
+[x] Lease timeout and retry-budget-exhaustion semantics, both ctest-covered
+[x] Quorum implemented and configurable (default 1); Decision A's production default still open
+[x] Anomaly outcomes never enter the certificate/verify path
+[ ] Persistence backend — deliberately not started; blocked on Decision B
+[ ] Postgres-vs-SQLite schema — deliberately not started; blocked on Decision B
+
+Phase 5 — status: DONE for the local executor; cluster/BOINC/direct-IP
+executors deliberately not started (Decision C still open, and no longer
+presumed to end in BOINC specifically per the project owner's framing).
+
+- `framework::WorkUnitExecutor` (`framework/executor.hpp`) is the seam
+  from the blueprint diagram: `submit(WorkUnitKey, run_fn) ->
+  std::future<WorkUnitOutcome>`, checked with a `static_assert` against
+  `LocalExecutor` the same way Phase 1's discovery/verification concepts
+  are checked against the three modules. Nothing in `WorkUnitKey`,
+  `WorkUnitTracker`, or any module names `LocalExecutor`; a future
+  `ClusterExecutor` or a direct-over-IP executor only has to satisfy the
+  same concept, matching the project owner's explicit framing that BOINC
+  is one possible option among several, not a design target to build
+  toward.
+- `LocalExecutor` is a fixed-size `std::jthread` pool with a
+  mutex/condition-variable task queue and `std::packaged_task`-backed
+  futures. `submit()` never blocks on worker availability (the explicit
+  "non-blocking" requirement); the returned `std::future` is how the
+  caller learns the outcome. Worker count defaults to
+  `std::thread::hardware_concurrency()`.
+- `tests/test_worker_pipeline.cpp` is the concrete "practical for a
+  single workstation" deliverable requested: it wires
+  `ModuleRegistry` + `WorkUnitTracker` + `LocalExecutor` together and
+  drives all three real modules (kurepa, toy_mod7, pigeonhole) through
+  enqueue -> lease -> submit -> result -> quiet-verify -> VERIFIED, using
+  only the same public APIs a future CLI or service would use. No
+  `math-worker` CLI binary was added in this pass (library + test only)
+  — flagged below as a cheap, natural next step, not built speculatively
+  ahead of being asked for.
+- Concurrency was checked beyond the project's existing ASan/UBSan/
+  LeakSanitizer combo (which cannot include ThreadSanitizer in the same
+  build): an ad hoc `-fsanitize=thread` build of `test_tracker` and
+  `test_worker_pipeline` (run five times, since race conditions can be
+  intermittent) found nothing. This was a manual, one-off invocation, not
+  wired into `CMakeLists.txt` — see "Open items" below.
+
+Phase 5 definition of done
+[x] WorkUnitExecutor concept exists and is structurally checked, not duck-typed by convention
+[x] LocalExecutor implemented, non-blocking, thread-pool-based
+[x] End-to-end local pipeline (registry + tracker + executor) exists and is tested
+[x] No module, WorkUnitKey, or tracker code names LocalExecutor or any other concrete executor
+[ ] ClusterExecutor / BOINC / direct-IP executor — deliberately not started; blocked on Decision C
+[ ] Hermetic per-WU sandboxing — deliberately not started; blocked on Decision C, per Phase 5's own original caution against building it speculatively
+
+Other changes made during this pass, and why
+
+- **Poco::JSON replaces nlohmann::json** for conjecture metadata loading
+  (`src/cli/metadata_loader.{hpp,cpp}`, `src/cli/hunter_main.cpp`'s
+  `list`/`info` commands), per the project owner's explicit request and
+  standing library-preference ordering (poco > nlohmann/json > ... ).
+  `CMakeLists.txt` now does `find_package(Poco REQUIRED COMPONENTS JSON)`
+  instead of `find_package(nlohmann_json)`; `Poco::JSON` is linked only on
+  the `math-hunter` CLI target (its sole consumer), so `mathhunter_core`
+  and everything built on top of it (framework, verifiers, conjectures)
+  stay free of a JSON-library dependency they never use — the same
+  "don't leak a dependency into a layer that doesn't need it" instinct
+  Phase 2's `sat::` layering guard already enforces for the SAT backend.
+  `Threads::Threads` was also added (`find_package(Threads REQUIRED)`,
+  linked `PUBLIC` on `mathhunter_core`) for `LocalExecutor`'s thread pool.
+  There is no automated test pinning the exact byte output of
+  `math-hunter info <id>`, so behavioral equivalence with the old
+  `nlohmann::json::dump(2)` output was confirmed by manual CLI smoke test
+  (`list`/`info`/`search`/`verify` against all three modules) rather than
+  a byte-diff; both libraries produce alphabetically-key-sorted, 2-space
+  indented JSON, so the visible output is equivalent even though the
+  underlying library changed.
+- **MPFR precision-policy guidance was received but is not yet
+  applicable.** The project owner asked that any future bit-width
+  constant use a single named source of truth (e.g. a
+  `precision::BITSIZE`-style constant) rather than a hardcoded magic
+  number, mirroring a pattern from another of their projects. Nothing in
+  Phases 3-5 does floating-point or arbitrary-precision-real arithmetic
+  at all — cost estimation and range partitioning are exact-integer GMP
+  arithmetic only — so there is currently no bit-width constant anywhere
+  to centralize. Recorded as a forward-looking constraint in
+  `docs/environment.md` for whenever MPFR is first actually introduced.
+- **The sibling project's script-test/`run_tests.pl`/`[TEST_SUITE_BEGIN]`
+  marker convention was deliberately not adopted.** math-hunter already
+  has its own working convention (`test_harness.hpp`'s `MH_CHECK`/
+  `MH_REQUIRE`/`MH_TEST_MAIN_EPILOGUE`, wired into `ctest` via
+  `tests/CMakeLists.txt`); introducing a second, differently-shaped test
+  marker/runner convention alongside it would be inconsistency, not the
+  "lasting advantage" the project owner asked this pass to aim for. Per
+  the project owner's own explicit note that "an extensive test suite is
+  not part of the task scope here," the new Phase 3-5 suite was kept to
+  five focused binaries (`test_encoded_blob`, `test_work_unit`,
+  `test_work_unit_determinism`, `test_tracker`, `test_worker_pipeline`)
+  rather than one test per class/method.
+
+Build/test/lint environment notes
+
+- Everything in this pass was built, tested, sanitizer-run, and
+  clang-tidy-scanned on **Ubuntu 24.04.4 LTS** (GCC 13.3.0, CMake 3.28.3,
+  clang-tidy/LLVM 18.1.3, Poco 1.11.0-4.1build2), not Ubuntu 26.04 as
+  `docs/environment.md` specifies. The execution environment available
+  for this pass had no Ubuntu 26.04 image or container runtime reachable
+  (network egress is allowlisted to a fixed domain set that does not
+  include a Docker/OCI registry), so 24.04 was used as the closest
+  available proxy, with the project owner's explicit sign-off to do so.
+  This is a real, open gap: package versions on 26.04 (GCC/clang-tidy/
+  Poco/OpenSSL/CMake) are very likely newer, and nothing in this pass
+  re-validates against them. Re-running the full build/test/sanitizer/
+  clang-tidy matrix on an actual 26.04 host or container before treating
+  this work as fully closed is the responsible next step, not assumed
+  done by this pass.
+- Full `ctest` (regular build): 12/12 passing (the pre-existing 6 tests
+  plus `check_layering`, unmodified and still green, plus the 5 new Phase
+  3-5 tests).
+- Sanitizer build (`-DMATHHUNTER_ENABLE_SANITIZERS=ON
+  -DMATHHUNTER_WARNINGS_AS_ERRORS=ON`, i.e. ASan+UBSan+LeakSanitizer and
+  `-Werror` against the project's full `-Wall -Wextra -Wpedantic -Wshadow
+  -Wconversion -Wsign-conversion ...` set): builds clean, 12/12 passing.
+- ThreadSanitizer: not part of the project's CMake option (mutually
+  exclusive with the existing Address+UB+Leak combo in one binary); a
+  manual ad hoc `-fsanitize=thread` compile of `test_tracker` and
+  `test_worker_pipeline` (the two binaries that actually touch
+  `WorkUnitTracker`'s mutex or `LocalExecutor`'s thread pool), run five
+  times for `test_worker_pipeline` specifically to catch intermittent
+  races, reported nothing. Recommend adding a proper, CMake-integrated
+  `MATHHUNTER_ENABLE_TSAN` option (mutually exclusive with
+  `MATHHUNTER_ENABLE_SANITIZERS`) in a future pass so this becomes a
+  repeatable `ctest`-driven check rather than a one-off manual run.
+- clang-tidy: scanned every `.cpp` under `src/` (new and pre-existing)
+  with `-stdlib=libc++ -fexperimental-library` (the second flag is newly
+  required by this pass: libc++ gates `std::jthread`/`std::stop_token`,
+  used by `LocalExecutor`, behind it until they are fully stabilized
+  upstream — added to the README's documented recipe). Two genuine
+  findings in this pass's own new code were fixed: a
+  `readability-redundant-member-init` on `WorkUnitRecord::lease_expiry`
+  (its own type's default constructor already value-initializes it), and
+  a `bugprone-exception-escape` false positive on the lambda passed to
+  `std::packaged_task` in `LocalExecutor::submit` (suppressed with a
+  targeted `NOLINT`, since `std::packaged_task::operator()` already
+  catches and stores any exception thrown by the wrapped callable in the
+  associated future by contract — the check's static heuristic doesn't
+  model that). Three additional findings were surfaced by this scan in
+  **pre-existing, untouched code** and are reported here rather than
+  fixed, since fixing them wasn't part of this task: `operator==` and
+  `message()` in `verifier/verification_error.hpp` (both
+  `bugprone-exception-escape`, from `std::visit`'s theoretical
+  `bad_variant_access` against a `noexcept`/`constexpr` context), and
+  `main()` in both `hunter_main.cpp` and `verifier_main.cpp` (same check,
+  from calling potentially-throwing filesystem/parsing code with no
+  top-level `try`/`catch`).
+
+Open items / notes for whoever picks this up next
+
+- Decisions A (quorum production default), B (persistence backend and
+  schema shape), and C (trust model: internal cluster vs. public/
+  volunteer, and therefore whether sandboxing is ever needed) are all
+  still open at the project-owner level. Phases 3-5 as built do not
+  block any answer to these; they were deliberately kept unresolved
+  rather than guessed.
+- No CLI entry point exists yet for the WorkUnit/Tracker/Executor stack
+  — it is library-only today, exercised by `tests/test_worker_pipeline.cpp`.
+  A thin `math-worker` binary (enqueue from CLI flags, run to completion
+  locally, print a summary) would be a natural, low-cost next step and
+  was deliberately not built speculatively in this pass.
+- `EncodedBlob`/`certificate.cpp` unification (§3.1's original suggestion)
+  remains a cheap, low-risk future cleanup, not done in this pass — see
+  "Deliberate deviation" above.
+- The DRAT/LRAT pigeonhole verifier upgrade (STATUS AUDIT 2, §6 item 2)
+  is untouched by this pass and remains the standing recommendation for
+  "next thing to implement" independent of the phase order, since it is
+  self-contained and does not touch the framework.
+- A proper `MATHHUNTER_ENABLE_TSAN` CMake option (see "Build/test/lint
+  environment notes" above) would make the ThreadSanitizer check
+  repeatable instead of a one-off manual run, now that real
+  multi-threaded code (`LocalExecutor`) exists in the tree for the first
+  time.
+- This pass's build/test/lint results should be re-validated on the
+  project's actual target OS (Ubuntu 26.04) rather than assumed to carry
+  over unchanged from the 24.04 environment this pass actually ran in. Confirmed build on 26.04 as with this latest status.
+

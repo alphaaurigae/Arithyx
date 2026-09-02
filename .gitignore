@@ -3,3 +3,4 @@
 !certificates/examples/*.mhcert
 
 build/
+build-san/

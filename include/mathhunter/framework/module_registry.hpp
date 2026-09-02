@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <functional>
 #include <span>
 #include <string>
@@ -9,6 +10,7 @@
 
 #include "mathhunter/certificate/certificate.hpp"
 #include "mathhunter/core/result.hpp"
+#include "mathhunter/framework/work_unit.hpp"
 
 namespace mathhunter::framework {
 
@@ -19,10 +21,26 @@ namespace mathhunter::framework {
 // Everything below it (src/conjectures/*_registration.cpp) is free to use
 // whatever concrete Witness/Evidence/ProofData types a module needs.
 
+enum class SilentVerifyOutcome : std::uint8_t {
+    Verified,
+    Rejected,
+    Unverifiable,
+};
+
 struct CertificateKindOps final {
     certificate::CertificateKind kind{};
     std::function<void(std::span<const std::uint8_t> payload)> inspect;
     std::function<int(std::span<const std::uint8_t> payload)> verify;
+    std::function<SilentVerifyOutcome(std::span<const std::uint8_t> payload)> verify_quiet;
+};
+
+struct WorkUnitOps final {
+    std::function<std::expected<WorkUnitKey, std::string>(const std::vector<std::string>& args)>
+        make_from_cli;
+    std::function<WorkUnitCost(const WorkUnitKey&)> estimate_cost;
+    std::function<std::vector<WorkUnitKey>(const WorkUnitKey&, std::uint64_t target_units)>
+        partition;
+    std::function<WorkUnitOutcome(const WorkUnitKey&)> run;
 };
 
 struct ModuleDescriptor final {
@@ -32,6 +50,7 @@ struct ModuleDescriptor final {
     std::function<int(const std::vector<std::string>& args)> run_search;
     std::function<int()> run_benchmark;
     std::vector<CertificateKindOps> kinds;
+    WorkUnitOps work_unit;
 };
 
 class ModuleRegistry final {

@@ -1,5 +1,7 @@
 #include "metadata_loader.hpp"
 
+#include <Poco/JSON/Parser.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -17,7 +19,7 @@ std::vector<std::filesystem::path> metadata_search_dirs() {
     return dirs;
 }
 
-std::optional<nlohmann::json> load_conjecture_metadata(const std::string& identifier) {
+std::optional<Poco::JSON::Object::Ptr> load_conjecture_metadata(const std::string& identifier) {
     for (const auto& dir : metadata_search_dirs()) {
         const auto path = dir / (identifier + ".json");
         std::ifstream in(path);
@@ -25,10 +27,10 @@ std::optional<nlohmann::json> load_conjecture_metadata(const std::string& identi
             continue;
         }
         try {
-            nlohmann::json j;
-            in >> j;
-            return j;
-        } catch (const nlohmann::json::exception&) {
+            Poco::JSON::Parser parser;
+            const auto result = parser.parse(in);
+            return result.extract<Poco::JSON::Object::Ptr>();
+        } catch (const Poco::Exception&) {
             return std::nullopt;
         }
     }

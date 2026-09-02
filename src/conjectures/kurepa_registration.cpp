@@ -3,11 +3,13 @@
 #include <string>
 #include <vector>
 
+#include "mathhunter/certificate/bigint_codec.hpp"
 #include "mathhunter/certificate/certificate.hpp"
 #include "mathhunter/conjectures/kurepa.hpp"
 #include "mathhunter/framework/backend_concepts.hpp"
 #include "mathhunter/framework/cli_args.hpp"
 #include "mathhunter/framework/module_registry.hpp"
+#include "mathhunter/framework/range_partition.hpp"
 #include "mathhunter/verifier/kurepa_verifier.hpp"
 #include "mathhunter/verifier/verification_backend.hpp"
 
@@ -22,6 +24,108 @@ using framework::cli_args::parse_string_flag;   // NOLINT
 static_assert(framework::RangeSearchDiscovery<decltype(&search_range), arithmetic::Integer, Witness>);
 static_assert(verifier::CounterexampleVerifier<verifier::KurepaVerifier, Witness, Evidence>);
 static_assert(verifier::BoundedResultVerifier<verifier::KurepaVerifier, arithmetic::Integer>);
+
+constexpr std::string_view kModuleId = "kurepa";
+
+core::EncodedBlob encode_range_partition(const arithmetic::Integer& begin,
+                                          const arithmetic::Integer& end) {
+    core::ByteWriter w;
+    certificate::put_nonneg_integer(w, begin);
+    certificate::put_nonneg_integer(w, end);
+    return core::EncodedBlob{.schema_version = 1, .bytes = std::move(w).take()};
+}
+
+std::expected<std::pair<arithmetic::Integer, arithmetic::Integer>, std::string>
+decode_range_partition(const core::EncodedBlob& blob) {
+    core::ByteReader r(blob.bytes);
+    auto begin = certificate::get_nonneg_integer(r);
+    if (!begin) return std::unexpected("malformed kurepa work unit: bad begin");
+    auto end = certificate::get_nonneg_integer(r);
+    if (!end) return std::unexpected("malformed kurepa work unit: bad end");
+    if (auto e = r.expect_end(); !e) return std::unexpected("malformed kurepa work unit: trailing bytes");
+    return std::make_pair(*begin, *end);
+}
+
+std::expected<framework::WorkUnitKey, std::string> kurepa_make_from_cli(
+    const std::vector<std::string>& args) {
+    const auto begin = parse_integer_flag(args, "--begin");
+    const auto end = parse_integer_flag(args, "--end");
+    if (!begin || !end || *begin >= *end) {
+        return std::unexpected("work kurepa requires --begin N --end N with begin < end");
+    }
+    return framework::WorkUnitKey{.module_id = std::string(kModuleId),
+                                   .partition = encode_range_partition(*begin, *end)};
+}
+
+framework::WorkUnitCost kurepa_estimate_cost(const framework::WorkUnitKey& key) {
+    auto range = decode_range_partition(key.partition);
+    if (!range) return framework::WorkUnitCost{.units = 0};
+    return framework::WorkUnitCost{
+        .units = framework::saturating_range_size_u64(range->first, range->second)};
+}
+
+std::vector<framework::WorkUnitKey> kurepa_partition(const framework::WorkUnitKey& key,
+                                                       std::uint64_t target_units) {
+    auto range = decode_range_partition(key.partition);
+    if (!range) return {key};
+    const auto chunks = framework::partition_integer_range(range->first, range->second, target_units);
+    std::vector<framework::WorkUnitKey> out;
+    out.reserve(chunks.size());
+    for (const auto& [chunk_begin, chunk_end] : chunks) {
+        out.push_back(framework::WorkUnitKey{.module_id = std::string(kModuleId),
+                                               .partition = encode_range_partition(chunk_begin, chunk_end)});
+    }
+    return out;
+}
+
+framework::WorkUnitOutcome kurepa_run(const framework::WorkUnitKey& key) {
+    auto range = decode_range_partition(key.partition);
+    if (!range) {
+        return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::Anomaly,
+                                           .certificate_kind = std::nullopt,
+                                           .payload = {},
+                                           .diagnostic = range.error()};
+    }
+    const auto outcome = search_range(range->first, range->second);
+    if (std::holds_alternative<core::CandidateCounterexample<Witness>>(outcome)) {
+        const auto candidate = std::get<core::CandidateCounterexample<Witness>>(outcome);
+        return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::Hit,
+                                           .certificate_kind =
+                                               certificate::CertificateKind::KurepaCounterexample,
+                                           .payload = encode_counterexample_payload(candidate),
+                                           .diagnostic = {}};
+    }
+    const auto bounded = std::get<core::BoundedSearchResult<arithmetic::Integer>>(outcome);
+    return framework::WorkUnitOutcome{.kind = framework::WorkUnitOutcomeKind::BoundedCompletion,
+                                       .certificate_kind =
+                                           certificate::CertificateKind::KurepaBoundedResult,
+                                       .payload = encode_bounded_result_payload(bounded),
+                                       .diagnostic = {}};
+}
+
+framework::SilentVerifyOutcome verify_counterexample_quiet(std::span<const std::uint8_t> payload) {
+    auto decoded = decode_counterexample_payload(payload);
+    if (!decoded) return framework::SilentVerifyOutcome::Rejected;
+    verifier::KurepaVerifier kv;
+    auto result = kv.verify_counterexample(decoded->witness);
+    if (result) return framework::SilentVerifyOutcome::Verified;
+    if (result.error() == verifier::VerificationFailure::DomainTooLargeForVerifier) {
+        return framework::SilentVerifyOutcome::Unverifiable;
+    }
+    return framework::SilentVerifyOutcome::Rejected;
+}
+
+framework::SilentVerifyOutcome verify_bounded_result_quiet(std::span<const std::uint8_t> payload) {
+    auto decoded = decode_bounded_result_payload(payload);
+    if (!decoded) return framework::SilentVerifyOutcome::Rejected;
+    verifier::KurepaVerifier kv;
+    auto result = kv.verify_bounded_result(*decoded);
+    if (result) return framework::SilentVerifyOutcome::Verified;
+    if (result.error() == verifier::VerificationFailure::DomainTooLargeForVerifier) {
+        return framework::SilentVerifyOutcome::Unverifiable;
+    }
+    return framework::SilentVerifyOutcome::Rejected;
+}
 
 int run_search(const std::vector<std::string>& args) {
     const auto begin = parse_integer_flag(args, "--begin");
@@ -166,10 +270,16 @@ void register_module() {
     descriptor.run_benchmark = &run_benchmark;
     descriptor.kinds.push_back({.kind = certificate::CertificateKind::KurepaCounterexample,
                                  .inspect = &inspect_counterexample,
-                                 .verify = &verify_counterexample});
+                                 .verify = &verify_counterexample,
+                                 .verify_quiet = &verify_counterexample_quiet});
     descriptor.kinds.push_back({.kind = certificate::CertificateKind::KurepaBoundedResult,
                                  .inspect = &inspect_bounded_result,
-                                 .verify = &verify_bounded_result});
+                                 .verify = &verify_bounded_result,
+                                 .verify_quiet = &verify_bounded_result_quiet});
+    descriptor.work_unit = framework::WorkUnitOps{.make_from_cli = &kurepa_make_from_cli,
+                                                    .estimate_cost = &kurepa_estimate_cost,
+                                                    .partition = &kurepa_partition,
+                                                    .run = &kurepa_run};
     framework::registry().register_module(std::move(descriptor));
 }
 

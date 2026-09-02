@@ -1,7 +1,8 @@
 #pragma once
 
+#include <Poco/JSON/Object.h>
+
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,7 +11,8 @@ namespace mathhunter::cli {
 
 [[nodiscard]] std::vector<std::filesystem::path> metadata_search_dirs();
 
-[[nodiscard]] std::optional<nlohmann::json> load_conjecture_metadata(const std::string& identifier);
+[[nodiscard]] std::optional<Poco::JSON::Object::Ptr> load_conjecture_metadata(
+    const std::string& identifier);
 
 [[nodiscard]] std::vector<std::string> list_conjecture_identifiers();
 
